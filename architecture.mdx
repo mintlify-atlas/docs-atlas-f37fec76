@@ -1,0 +1,592 @@
+---
+title: 'Architecture'
+description: 'Technical architecture and design patterns of the Workflow Engine Platform'
+---
+
+The Workflow Engine Platform is built as a monorepo with clear separation between static workflow definitions and runtime execution state. This architecture enables long-running, human-in-the-loop workflows that can pause for days or weeks while maintaining database-backed consistency.
+
+## System Overview
+
+```mermaid
+graph TB
+    subgraph "Frontend (Next.js 16)"
+        UI["Web UI<br/>shadcn/ui"]
+        Auth["Better Auth<br/>Session Management"]
+        Builder["Workflow Builder<br/>React Flow"]
+    end
+    
+    subgraph "Backend (FastAPI)"
+        API["FastAPI Server<br/>Port 8000"]
+        JWT["JWT Verification<br/>JWKS Client"]
+        Engine["Workflow Engine"]
+        Outbox["Outbox Worker"]
+        Priority["Priority Worker"]
+    end
+    
+    subgraph "Data Layer"
+        Neon[("Neon PostgreSQL<br/>Static + Runtime")]
+        Rabbit["RabbitMQ<br/>workflow.events"]
+    end
+    
+    UI -->|HTTP + Bearer Token| API
+    Auth -->|Issues JWT| UI
+    Builder -->|Save Definitions| API
+    API -->|Verify Token| JWT
+    API -->|Read/Write| Neon
+    API -->|Write Events| Neon
+    Outbox -->|Poll & Publish| Rabbit
+    Outbox -->|Read Outbox| Neon
+    Priority -->|Poll & Release| Neon
+    Engine -->|State Transitions| Neon
+```
+
+## Technology Stack
+
+### Frontend
+
+- **Next.js 16**: React framework with App Router and Turbopack
+- **Better Auth 1.5**: Email/password authentication with JWT support
+- **shadcn/ui**: Component library built on Radix UI and Tailwind CSS
+- **React Flow (@xyflow/react)**: Visual workflow graph editor
+- **Zod**: Runtime schema validation
+
+### Backend
+
+- **FastAPI**: High-performance async Python web framework
+- **uv**: Fast Python package manager and runner
+- **psycopg 3**: PostgreSQL adapter for Python
+- **PyJWT**: Better Auth JWT verification
+- **pika**: RabbitMQ client library
+
+### Infrastructure
+
+- **Neon PostgreSQL**: Serverless Postgres for all persistent data
+- **RabbitMQ 3.13**: Message broker for async task delivery
+- **Docker Compose**: Local development queue infrastructure
+- **pnpm**: Fast, disk-efficient package manager for the monorepo
+
+## Monorepo Structure
+
+The project uses a pnpm workspace monorepo:
+
+```
+workflow-engine-platform/
+├── apps/
+│   ├── web/              # Next.js frontend
+│   │   ├── app/          # App Router pages
+│   │   ├── components/   # React components
+│   │   ├── lib/          # Client utilities
+│   │   └── package.json
+│   └── api/              # FastAPI backend
+│       ├── src/api/      # API modules
+│       ├── scripts/      # Worker scripts
+│       ├── pyproject.toml
+│       └── .env
+├── infra/
+│   ├── docker-compose.yml
+│   └── postgres/
+│       └── init/
+│           └── 01_foundation.sql
+├── docs/                 # Architecture documentation
+├── package.json          # Root workspace config
+├── pnpm-workspace.yaml
+└── pnpm-lock.yaml
+```
+
+### App Structure
+
+#### `apps/web` (Next.js)
+
+```
+web/
+├── app/
+│   ├── api/auth/[...all]/route.ts  # Better Auth handler
+│   ├── builder/page.tsx            # Workflow definition builder
+│   ├── dashboard/page.tsx          # User dashboard
+│   ├── operations/page.tsx         # Runtime console
+│   ├── sign-in/page.tsx
+│   ├── sign-up/page.tsx
+│   └── layout.tsx
+├── components/
+│   ├── auth-card.tsx               # Login/signup UI
+│   └── ...
+├── lib/
+│   ├── auth.ts                     # Better Auth config
+│   ├── server-env.ts               # Environment validation
+│   └── ...
+└── scripts/
+    └── seed-test-users.mjs         # Dev user seeding
+```
+
+#### `apps/api` (FastAPI)
+
+```
+api/
+├── src/api/
+│   ├── main.py                     # FastAPI app factory
+│   ├── config.py                   # Settings (Pydantic)
+│   ├── auth.py                     # JWT verification
+│   ├── db.py                       # Database connections
+│   ├── workflows.py                # Definition CRUD
+│   ├── workflow_schemas.py
+│   ├── runtime.py                  # Instance operations
+│   ├── runtime_schemas.py
+│   ├── realtime.py                 # SSE/Realtime events
+│   ├── outbox_worker.py            # Outbox publisher
+│   └── priority_release_worker.py  # Priority escalation
+└── scripts/
+    ├── bootstrap_neon.py           # DB schema bootstrap
+    ├── outbox_worker.py            # Worker entry point
+    ├── priority_release_worker.py
+    ├── publish_outbox.py           # One-shot publish
+    └── release_priority_tasks.py   # One-shot release
+```
+
+## Static vs Runtime Schema Split
+
+A critical architectural decision is the separation of **static definition data** from **runtime execution state**. This enables version control, safe editing, and concurrent execution.
+
+### Static Schema
+
+Static tables define **what** a workflow is:
+
+```sql
+-- Workflow identity
+workflow_definition (id, key, name, description, status)
+
+-- Immutable versioned snapshots
+workflow_definition_version (id, workflow_definition_id, version_no, is_published, graph_json, builder_layout)
+
+-- Steps within a version
+workflow_step_definition (id, workflow_version_id, step_code, step_label, step_type, config)
+
+-- Who can act on each step
+workflow_step_association (id, step_definition_id, association_type, association_value, priority)
+
+-- Approval and escalation policies
+workflow_step_assignment_policy (id, step_definition_id, approval_mode, escalation_timeout_seconds)
+
+-- Transitions between steps
+workflow_transition_definition (id, from_step_definition_id, to_step_definition_id, action_type, transition_label)
+
+-- Subworkflow mappings
+workflow_step_mapping (id, step_definition_id, child_workflow_definition_id, input_mapping, output_mapping)
+
+-- Notification templates
+notification_template (id, workflow_version_id, step_definition_id, event_type, title_template, body_template)
+```
+
+**Key insight**: Runtime instances reference `workflow_definition_version.id`, not the mutable `workflow_definition.id`. This means in-flight workflows are unaffected by definition edits.
+
+### Runtime Schema
+
+Runtime tables track **execution state**:
+
+```sql
+-- Active workflow instances
+workflow_instance (id, workflow_version_id, status, current_step_instance_id, started_by)
+
+-- Instance variables and context
+workflow_instance_data (workflow_instance_id, input_data, context_data, output_data)
+
+-- Step execution records
+step_instance (id, workflow_instance_id, step_definition_id, status, attempt_no, visit_count)
+
+-- Actionable user tasks
+human_task (id, step_instance_id, assigned_user_id, status, approval_mode_snapshot, due_at)
+
+-- Complete audit trail
+workflow_action (id, workflow_instance_id, step_instance_id, action_type, actor_user_id, remark_text)
+
+-- Status change history
+workflow_status_history (id, workflow_instance_id, old_status, new_status, changed_by_action_id)
+
+-- Parent-child workflow links
+subworkflow_link (id, parent_workflow_instance_id, child_workflow_instance_id, link_status)
+
+-- In-app notifications
+notification (id, user_id, workflow_instance_id, notification_type, title, body, is_read)
+
+-- Outbox events for RabbitMQ
+outbox_event (id, aggregate_type, aggregate_id, event_type, payload, status, available_at)
+```
+
+**Key insight**: The database is the source of truth. RabbitMQ is only a delivery mechanism.
+
+## Authentication Flow
+
+### Better Auth JWT Architecture
+
+The platform uses Better Auth for session management in Next.js and JWT tokens for API authentication:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Browser
+    participant NextJS
+    participant BetterAuth
+    participant FastAPI
+    participant Neon
+    
+    User->>NextJS: POST /api/auth/sign-in
+    NextJS->>BetterAuth: Validate credentials
+    BetterAuth->>Neon: Query user table
+    Neon-->>BetterAuth: User record
+    BetterAuth->>Neon: Create session
+    BetterAuth-->>NextJS: Set session cookie
+    NextJS-->>Browser: 200 OK
+    
+    Browser->>NextJS: Request JWT for API
+    NextJS->>BetterAuth: Issue access token
+    BetterAuth-->>Browser: JWT token
+    
+    Browser->>FastAPI: GET /api/v1/me<br/>Authorization: Bearer {JWT}
+    FastAPI->>BetterAuth: Fetch JWKS from /api/auth/jwks
+    FastAPI->>FastAPI: Verify JWT signature
+    FastAPI->>FastAPI: Validate issuer, audience, expiry
+    FastAPI->>FastAPI: Extract user_id from 'sub' claim
+    FastAPI-->>Browser: {userId, email, claims}
+```
+
+### Better Auth Configuration
+
+Better Auth runs exclusively in the Next.js app:
+
+```typescript apps/web/lib/auth.ts
+import { betterAuth } from "better-auth"
+import { jwt } from "better-auth/plugins"
+import { Pool } from "pg"
+
+export const auth = betterAuth({
+  database: new Pool({ connectionString: process.env.DATABASE_URL }),
+  secret: process.env.BETTER_AUTH_SECRET,
+  baseURL: process.env.BETTER_AUTH_URL,
+  emailAndPassword: {
+    enabled: true,
+    autoSignIn: true,
+  },
+  user: {
+    additionalFields: {
+      role: { type: "string", defaultValue: "user" },
+      displayName: { type: "string" },
+      isTestUser: { type: "boolean", defaultValue: false },
+    },
+  },
+  plugins: [jwt()],
+})
+```
+
+### FastAPI JWT Verification
+
+FastAPI validates tokens using the Better Auth JWKS endpoint:
+
+```python apps/api/src/api/auth.py
+import jwt
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer
+
+security = HTTPBearer(auto_error=False)
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    settings: Settings = Depends(get_settings),
+) -> AuthenticatedUser:
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Missing bearer token.")
+    
+    token = credentials.credentials
+    signing_key = get_jwks_client(settings).get_signing_key_from_jwt(token)
+    payload = jwt.decode(
+        token,
+        signing_key.key,
+        algorithms=["EdDSA", "RS256", "ES256"],
+        audience=settings.better_auth_audience,
+        issuer=settings.better_auth_issuer,
+    )
+    
+    subject = payload.get("sub")
+    return AuthenticatedUser(
+        user_id=subject,
+        email=payload.get("email"),
+        payload=payload,
+    )
+```
+
+## RabbitMQ Outbox Pattern
+
+The platform uses the **transactional outbox pattern** to ensure reliable event delivery without distributed transactions.
+
+### Why Outbox?
+
+Directly publishing to RabbitMQ during a database transaction creates atomicity risks:
+- If the transaction rolls back, RabbitMQ has already received the event
+- If RabbitMQ is unavailable, the transaction fails even though state changes are valid
+
+The outbox pattern solves this:
+
+1. **Write events to the database** in the same transaction as state changes
+2. **Commit the transaction**
+3. **Outbox worker polls** the `outbox_event` table
+4. **Publish to RabbitMQ** and mark as `published`
+
+### Outbox Worker Implementation
+
+The outbox worker is a long-running Python process:
+
+```python apps/api/src/api/outbox_worker.py
+def run_once(settings: Settings | None = None) -> int:
+    # Claim a batch of pending events
+    rows = _claim_batch(settings, worker_id)
+    
+    for row in rows:
+        try:
+            # Publish to RabbitMQ with confirm_delivery
+            channel.basic_publish(
+                exchange=settings.outbox_exchange,
+                routing_key=row["event_type"],
+                body=json.dumps(envelope).encode("utf-8"),
+                mandatory=True,
+            )
+            
+            # Mark as published in database
+            _mark_published(row["id"], worker_id)
+        except Exception as exc:
+            # Retry with exponential backoff
+            _mark_failed(row, worker_id, str(exc))
+    
+    return published_count
+
+def run_forever(settings: Settings | None = None) -> None:
+    while not stop_event.is_set():
+        published = run_once(settings)
+        if not published:
+            stop_event.wait(settings.outbox_poll_interval_seconds)
+```
+
+### Claiming Strategy
+
+The worker uses `SELECT FOR UPDATE SKIP LOCKED` for distributed locking:
+
+```sql
+WITH candidates AS (
+    SELECT id
+    FROM outbox_event
+    WHERE (
+        status IN ('pending', 'retry_scheduled')
+        AND available_at <= now()
+    ) OR (
+        status = 'processing'
+        AND claimed_at <= now() - make_interval(secs => %s)
+    )
+    ORDER BY available_at, created_at
+    FOR UPDATE SKIP LOCKED
+    LIMIT %s
+)
+UPDATE outbox_event AS event
+SET status = 'processing',
+    claimed_at = now(),
+    claimed_by = %s,
+    retry_count = event.retry_count + 1
+FROM candidates
+WHERE event.id = candidates.id
+RETURNING event.*
+```
+
+This allows multiple workers to run concurrently without conflicts.
+
+### Retry Strategy
+
+Failed events are retried with exponential backoff:
+
+```python
+def _backoff_seconds(retry_count: int) -> int:
+    base = min(300, 2 ** min(max(retry_count - 1, 0), 8))
+    return base + random.randint(0, max(1, base // 4))
+```
+
+- Retry 1: ~2 seconds
+- Retry 2: ~4 seconds
+- Retry 3: ~8 seconds
+- ...
+- Retry 8+: ~5 minutes (capped)
+
+After `max_attempts` (default 20), events move to `dead_letter` status.
+
+## Priority Chain Escalation
+
+For human tasks with `approval_mode = 'priority_chain'`, the platform notifies assignees sequentially based on priority.
+
+### How It Works
+
+1. **Step enters waiting state**: Create multiple `human_task` rows, one per assignee
+2. **Set initial task to `open`**: Highest priority (lowest `priority_rank`)
+3. **Set others to `queued`**: With `escalation_due_at` timestamps
+4. **Priority worker polls**: Finds tasks past their escalation deadline
+5. **Expire current task**: Mark as `expired` if incomplete
+6. **Release next task**: Mark as `open` and update `due_at`
+7. **Send notification**: Via outbox event
+
+### Priority Release Worker
+
+```python apps/api/src/api/priority_release_worker.py
+def run_once(settings: Settings | None = None) -> int:
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            # Acquire advisory lock to ensure single worker
+            if not _acquire_iteration_lock(cursor, lock_id):
+                return 0
+            
+            # Find tasks past escalation deadline
+            cursor.execute("""
+                WITH due_tasks AS (
+                    SELECT DISTINCT ON (queued.step_instance_id)
+                        queued.id, queued.assigned_user_id, ...
+                    FROM human_task queued
+                    WHERE queued.status = 'queued'
+                      AND queued.approval_mode_snapshot = 'priority_chain'
+                      AND queued.escalation_due_at <= now()
+                      AND NOT EXISTS (
+                          SELECT 1 FROM human_task active
+                          WHERE active.step_instance_id = queued.step_instance_id
+                            AND active.status IN ('open', 'claimed')
+                      )
+                    ORDER BY queued.step_instance_id, queued.sequence_no
+                )
+                SELECT * FROM due_tasks LIMIT %s
+            """, (batch_size,))
+            
+            for row in cursor.fetchall():
+                # Expire current active task
+                cursor.execute("""
+                    UPDATE human_task
+                    SET status = 'expired'
+                    WHERE step_instance_id = %s AND status IN ('open', 'claimed')
+                """, (row["step_instance_id"],))
+                
+                # Release next task
+                cursor.execute("""
+                    UPDATE human_task
+                    SET status = 'open', due_at = now()
+                    WHERE id = %s AND status = 'queued'
+                """, (row["id"],))
+                
+                # Create notification and outbox event
+                _create_notification(...)
+                _record_outbox(...)
+        
+        connection.commit()
+```
+
+### Advisory Lock
+
+The worker uses a PostgreSQL advisory lock to ensure only one instance runs at a time:
+
+```python
+def _acquire_iteration_lock(cursor, lock_id: int) -> bool:
+    cursor.execute(
+        "SELECT pg_try_advisory_xact_lock(%s) AS acquired",
+        (lock_id,),
+    )
+    return cursor.fetchone()["acquired"]
+```
+
+The lock is automatically released when the transaction commits or rolls back.
+
+## Workflow Execution Engine
+
+### State Machine
+
+Each workflow instance progresses through states:
+
+- `running`: Actively executing
+- `waiting`: Paused for human action
+- `paused`: Manually suspended
+- `completed`: Terminal success state
+- `rejected`: Terminal rejection state
+- `failed`: Terminal error state
+- `cancelled`: Manually stopped
+
+### Step Instance Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: Created
+    pending --> active: Execution starts
+    active --> waiting: Human task
+    active --> completed: System success
+    active --> failed: System error
+    waiting --> completed: User approves
+    waiting --> rejected: User rejects
+    waiting --> reverted: User reverts
+    completed --> [*]
+    rejected --> [*]
+    failed --> [*]
+    reverted --> pending: Return to previous step
+```
+
+### Transaction Boundaries
+
+All workflow state changes happen in a single database transaction:
+
+```python apps/api/src/api/runtime.py
+with get_db_connection() as connection:
+    with connection.cursor() as cursor:
+        # 1. Validate user can act
+        # 2. Update human_task status
+        # 3. Update step_instance
+        # 4. Record workflow_action
+        # 5. Update workflow_instance status
+        # 6. Record workflow_status_history
+        # 7. Create notification records
+        # 8. Insert outbox events
+        # 9. Advance to next step if applicable
+    
+    connection.commit()  # All or nothing
+```
+
+This ensures atomicity: either the entire state transition succeeds, or nothing changes.
+
+## Configuration Management
+
+FastAPI uses Pydantic Settings for type-safe configuration:
+
+```python apps/api/src/api/config.py
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    app_name: str = "workflow-engine-api"
+    workflow_database_url: str
+    rabbitmq_url: str = "amqp://workflow:workflow@localhost:5672/"
+    outbox_batch_size: int = 100
+    outbox_poll_interval_seconds: float = 0.5
+    better_auth_jwks_url: str = "http://localhost:3000/api/auth/jwks"
+    
+    model_config = SettingsConfigDict(
+        env_file=(".env", "../.env"),
+        env_file_encoding="utf-8",
+    )
+```
+
+All settings can be overridden via environment variables.
+
+## Next Steps
+
+<CardGroup cols={2}>
+
+<Card title="Quickstart" icon="rocket" href="/quickstart">
+Get the platform running locally in minutes
+</Card>
+
+<Card title="Workflow Builder" icon="diagram-project" href="/builder">
+Learn how to design and publish workflows
+</Card>
+
+<Card title="API Reference" icon="code" href="/api/auth/overview">
+Complete FastAPI endpoint documentation
+</Card>
+
+<Card title="Deployment" icon="cloud" href="/deployment">
+Deploy to production with Docker and managed services
+</Card>
+
+</CardGroup>

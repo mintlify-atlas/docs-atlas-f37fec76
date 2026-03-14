@@ -1,0 +1,163 @@
+---
+title: List Workflow Definitions
+api: GET /api/v1/workflow-definitions
+---
+
+Retrieves a list of all workflow definitions with summary information including step and transition counts.
+
+## Authentication
+
+Requires Bearer token authentication.
+
+## Response
+
+<ResponseField name="items" type="array">
+  Array of workflow definition summaries.
+  
+  <ResponseField name="items[].id" type="UUID">
+    Unique identifier for the workflow definition.
+  </ResponseField>
+  
+  <ResponseField name="items[].key" type="string">
+    Unique key for the workflow definition.
+  </ResponseField>
+  
+  <ResponseField name="items[].name" type="string">
+    Human-readable name of the workflow.
+  </ResponseField>
+  
+  <ResponseField name="items[].description" type="string">
+    Description of the workflow.
+  </ResponseField>
+  
+  <ResponseField name="items[].status" type="string">
+    Current status: `draft`, `active`, or `archived`.
+  </ResponseField>
+  
+  <ResponseField name="items[].latestVersionId" type="UUID | null">
+    ID of the latest version, or null if no versions exist.
+  </ResponseField>
+  
+  <ResponseField name="items[].latestVersionNo" type="integer | null">
+    Version number of the latest version, or null if no versions exist.
+  </ResponseField>
+  
+  <ResponseField name="items[].stepCount" type="integer">
+    Total number of steps in the latest version.
+  </ResponseField>
+  
+  <ResponseField name="items[].transitionCount" type="integer">
+    Total number of transitions in the latest version.
+  </ResponseField>
+</ResponseField>
+
+## Example Request
+
+<CodeGroup>
+
+```bash cURL
+curl -X GET https://api.example.com/api/v1/workflow-definitions \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+```javascript JavaScript
+const response = await fetch('https://api.example.com/api/v1/workflow-definitions', {
+  headers: {
+    'Authorization': 'Bearer YOUR_TOKEN'
+  }
+});
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.get(
+    'https://api.example.com/api/v1/workflow-definitions',
+    headers={
+        'Authorization': 'Bearer YOUR_TOKEN'
+    }
+)
+
+data = response.json()
+```
+
+</CodeGroup>
+
+## Example Response
+
+```json
+{
+  "items": [
+    {
+      "id": "9a7b8c9d-1234-5678-90ab-cdef12345678",
+      "key": "expense-approval",
+      "name": "Expense Approval Workflow",
+      "description": "Multi-level approval workflow for expense requests",
+      "status": "active",
+      "latestVersionId": "1a2b3c4d-5678-90ab-cdef-123456789012",
+      "latestVersionNo": 3,
+      "stepCount": 5,
+      "transitionCount": 8
+    },
+    {
+      "id": "2b3c4d5e-6789-0abc-def1-234567890123",
+      "key": "leave-request",
+      "name": "Leave Request Workflow",
+      "description": "Employee leave request and approval process",
+      "status": "active",
+      "latestVersionId": "3c4d5e6f-7890-abcd-ef12-345678901234",
+      "latestVersionNo": 1,
+      "stepCount": 4,
+      "transitionCount": 6
+    },
+    {
+      "id": "4d5e6f7g-8901-bcde-f123-456789012345",
+      "key": "procurement-approval",
+      "name": "Procurement Approval Workflow",
+      "description": "Approval workflow for procurement requests",
+      "status": "draft",
+      "latestVersionId": "5e6f7g8h-9012-cdef-1234-567890123456",
+      "latestVersionNo": 1,
+      "stepCount": 6,
+      "transitionCount": 10
+    }
+  ]
+}
+```
+
+## Status Codes
+
+<ResponseField name="200" type="OK">
+  Workflow definitions retrieved successfully.
+</ResponseField>
+
+<ResponseField name="401" type="Unauthorized">
+  Missing or invalid authentication token.
+</ResponseField>
+
+## Usage Notes
+
+### Workflow Status
+
+- **draft**: Workflow is being designed and not yet published
+- **active**: Workflow is published and can be used to create instances
+- **archived**: Workflow is no longer in active use but retained for historical purposes
+
+### Sorting
+
+Results are ordered by creation date in descending order (newest first).
+
+### Version Information
+
+- `latestVersionId` and `latestVersionNo` reflect the most recent version of the workflow definition
+- Step and transition counts are based on the latest version
+- If a workflow definition has no versions (edge case), these fields will be `null` and counts will be `0`
+
+### Use Cases
+
+1. **Workflow Directory**: Display all available workflows to users
+2. **Workflow Selection**: Allow users to choose a workflow for creating instances
+3. **Monitoring Dashboard**: Show overview of all workflow definitions with version info
+4. **Admin Interface**: Manage and compare different workflow definitions

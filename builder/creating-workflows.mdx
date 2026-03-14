@@ -1,0 +1,496 @@
+---
+title: Creating Workflows
+description: Step-by-step guide to building workflow definitions in the visual builder
+---
+
+This guide walks you through creating a complete workflow definition using the builder UI at `/builder`.
+
+## Prerequisites
+
+<Steps>
+  <Step title="Authenticate">
+    Sign in with a valid user account. The builder uses Better Auth and will redirect to `/sign-in` if unauthenticated.
+  </Step>
+  <Step title="Access the builder">
+    Navigate to `/builder` from the dashboard or directly via the URL.
+  </Step>
+</Steps>
+
+## Initial Setup
+
+### Default Workflow Template
+
+When you first open the builder, it loads a default "Vendor onboarding" template with:
+
+```typescript
+// From workflow-builder.tsx:262-340
+const initialSteps = (): BuilderStep[] => [
+  {
+    stepCode: "start_request",
+    stepLabel: "Start request",
+    stepType: "start",
+    sequenceHint: 0,
+    allowRevert: false,
+    // ...
+  },
+  {
+    stepCode: "manager_approval",
+    stepLabel: "Manager approval",
+    stepType: "human_task",
+    sequenceHint: 1,
+    assignmentPolicy: {
+      approvalMode: "priority_chain",
+      priorityEscalationEnabled: true,
+      escalationTimeoutSeconds: "86400",
+    },
+    associations: [
+      {
+        associationValue: "manager@example.com",
+        priority: "1",
+        notificationOrder: "1",
+        escalationAfterSeconds: "86400",
+      },
+      {
+        associationValue: "reviewer1@example.com",
+        priority: "2",
+        notificationOrder: "2",
+        escalationAfterSeconds: "172800",
+      },
+    ],
+  },
+  {
+    stepCode: "completed",
+    stepLabel: "Completed",
+    stepType: "end",
+    sequenceHint: 2,
+    isTerminal: true,
+  },
+]
+```
+
+## Step 1: Configure Workflow Metadata
+
+In the **Workflow metadata** card:
+
+<CodeGroup>
+```json Example Payload
+{
+  "key": "vendor_onboarding",
+  "name": "Vendor onboarding",
+  "description": "Approve onboarding with human review, escalation, and a terminal completion step."
+}
+```
+</CodeGroup>
+
+| Field | Type | Validation | Description |
+|-------|------|------------|-------------|
+| `key` | `string` | `min_length=1`, unique | Machine-readable identifier (e.g., `expense_approval`) |
+| `name` | `string` | `min_length=1` | Human-readable display name |
+| `description` | `string` | Optional | Brief summary of the workflow purpose |
+
+<Note>
+  The `key` must be unique across all workflow definitions in the database. The API returns a 409 Conflict error if a duplicate key is submitted.
+</Note>
+
+## Step 2: Add and Configure Steps
+
+Click **Add step** to create new workflow steps. Each step requires:
+
+### Basic Step Fields
+
+<CodeGroup>
+```json Human Task Example
+{
+  "stepCode": "manager_approval",
+  "stepLabel": "Manager approval",
+  "description": "Human review with sequential escalation.",
+  "stepType": "human_task",
+  "sequenceHint": 1,
+  "allowRevert": true,
+  "remarkRequiredOnApprove": false,
+  "remarkRequiredOnReject": true,
+  "remarkRequiredOnRevert": true,
+  "maxVisitsPerInstance": 3,
+  "isTerminal": false
+}
+```
+
+```json Start Step Example
+{
+  "stepCode": "start_request",
+  "stepLabel": "Start request",
+  "description": "Entry point for the workflow instance.",
+  "stepType": "start",
+  "sequenceHint": 0,
+  "allowRevert": false,
+  "isTerminal": false
+}
+```
+
+```json End Step Example
+{
+  "stepCode": "completed",
+  "stepLabel": "Completed",
+  "description": "Terminal success step.",
+  "stepType": "end",
+  "sequenceHint": 2,
+  "isTerminal": true
+}
+```
+</CodeGroup>
+
+### Step Types
+
+The builder supports six step types (workflow_schemas.py:12):
+
+```python
+StepType = Literal["start", "end", "human_task", "system_task", "subworkflow", "decision"]
+```
+
+| Type | Purpose | Validation |
+|------|---------|------------|
+| `start` | Entry point | Exactly one required |
+| `end` | Terminal step | At least one terminal/end required |
+| `human_task` | Manual approval/review | Requires associations |
+| `system_task` | Automated processing | No associations needed |
+| `subworkflow` | Trigger child workflow | Requires `subworkflowMapping` |
+| `decision` | Conditional routing | Use with `conditionExpression` |
+
+<Warning>
+  You must have **exactly one** `start` step and **at least one** terminal or `end` step. The API validation will reject definitions that violate these rules (workflows.py:79-87).
+</Warning>
+
+### Assignment Policy
+
+For `human_task` steps, configure the assignment policy:
+
+```typescript
+// From workflow-builder.tsx:1318-1382
+<select
+  onChange={(event) => updateStepPolicy(stepIndex, { approvalMode: event.target.value })}
+  value={step.assignmentPolicy.approvalMode}
+>
+  <option value="priority_chain">priority_chain</option>
+  <option value="approve_any_one">approve_any_one</option>
+  <option value="approve_all">approve_all</option>
+  <option value="notify_all">notify_all</option>
+</select>
+```
+
+<AccordionGroup>
+  <Accordion title="priority_chain">
+    Assigns to priority 1 first, then escalates to priority 2 after timeout, and so on.
+    
+    ```json
+    {
+      "approvalMode": "priority_chain",
+      "priorityEscalationEnabled": true,
+      "escalationTimeoutSeconds": 86400,
+      "reminderIntervalSeconds": 43200,
+      "maxEscalationCount": 2
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="approve_any_one">
+    Assigns to all associations simultaneously. First approval completes the step.
+    
+    ```json
+    {
+      "approvalMode": "approve_any_one",
+      "requiredApprovalsCount": null
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="approve_all">
+    All assigned users must approve before the step completes.
+    
+    ```json
+    {
+      "approvalMode": "approve_all",
+      "requiredApprovalsCount": null
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="notify_all">
+    Sends notifications to all associations but doesn't require action.
+    
+    ```json
+    {
+      "approvalMode": "notify_all"
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Associations
+
+Click **Add association** to assign users, roles, groups, or SQL rules to a step:
+
+```typescript
+// From workflow_schemas.py:16-24
+class WorkflowAssociationInput(BaseModel):
+    associationType: AssociationType  # "user" | "role" | "group" | "sql_rule"
+    associationValue: str = Field(min_length=1)
+    canApprove: bool = True
+    canReject: bool = True
+    canRevert: bool = True
+    priority: int | None = None
+    notificationOrder: int | None = None
+    escalationAfterSeconds: int | None = None
+```
+
+<CodeGroup>
+```json User Association
+{
+  "associationType": "user",
+  "associationValue": "manager@example.com",
+  "priority": 1,
+  "notificationOrder": 1,
+  "escalationAfterSeconds": 86400,
+  "canApprove": true,
+  "canReject": true,
+  "canRevert": true
+}
+```
+
+```json Role Association
+{
+  "associationType": "role",
+  "associationValue": "finance_approver",
+  "priority": 2,
+  "notificationOrder": 2,
+  "escalationAfterSeconds": 172800,
+  "canApprove": true,
+  "canReject": false,
+  "canRevert": false
+}
+```
+</CodeGroup>
+
+<Note>
+  The builder UI loads available users from `/api/users` and populates a dropdown for user associations (workflow-builder.tsx:651-661).
+</Note>
+
+### Notification Templates
+
+Configure in-app notifications sent when the step becomes actionable:
+
+```json
+{
+  "titleTemplate": "Approval needed: {stepLabel}",
+  "bodyTemplate": "{workflowName} is waiting for {actorEmail} on {stepCode}.",
+  "allowActorOverride": true
+}
+```
+
+Supported variables (workflows.py:586-591):
+- `{workflowName}` - Definition name
+- `{stepLabel}` - Step label
+- `{stepCode}` - Step code
+- `{actorEmail}` - Assignee email
+
+## Step 3: Define Transitions
+
+Click **Add transition** to create routing rules between steps.
+
+### Basic Transition
+
+```json
+{
+  "fromStepCode": "start_request",
+  "toStepCode": "manager_approval",
+  "actionType": "approve",
+  "transitionLabel": "submit",
+  "description": "Start the approval path.",
+  "conditionExpression": null,
+  "priority": 0
+}
+```
+
+### Action Types
+
+```python
+# From workflow_schemas.py:9
+ActionType = Literal["approve", "reject", "revert", "custom"]
+```
+
+| Action | Purpose | Validation |
+|--------|---------|------------|
+| `approve` | Move forward in the workflow | Common for happy path |
+| `reject` | Terminate or route to rejection | Often targets terminal step |
+| `revert` | Send back to previous step | Requires `allowRevert: true` |
+| `custom` | Custom action code | Requires `actionCode` field |
+
+<Warning>
+  If `actionType: "custom"`, you **must** provide an `actionCode` value. The API validation will reject transitions without it (workflows.py:101-104).
+</Warning>
+
+### Terminal Transitions
+
+Set `toStepCode: null` or `""` for transitions that end the workflow:
+
+```json
+{
+  "fromStepCode": "manager_approval",
+  "toStepCode": null,
+  "actionType": "reject",
+  "transitionLabel": "reject outright",
+  "description": "End the workflow immediately."
+}
+```
+
+## Step 4: Preview and Validate
+
+As you build, the **Live graph preview** updates automatically:
+
+```typescript
+// From workflow-builder.tsx:610-611
+const graphNodes = useMemo(() => createNodes(steps), [steps])
+const graphEdges = useMemo(() => createEdges(transitions), [transitions])
+```
+
+The **Canonical JSON preview** shows the exact payload that will be sent to the API:
+
+```json
+{
+  "key": "vendor_onboarding",
+  "name": "Vendor onboarding",
+  "description": "...",
+  "builderLayout": {
+    "nodes": [...],
+    "edges": [...],
+    "viewport": { "x": 0, "y": 0, "zoom": 1 }
+  },
+  "steps": [...],
+  "transitions": [...]
+}
+```
+
+## Step 5: Save to Neon
+
+Click **Save workflow to Neon**. The API will:
+
+1. Validate the payload (workflows.py:72-192)
+2. Create a `workflow_definition` record
+3. Insert a `workflow_definition_version` (v1)
+4. Insert all `workflow_step_definition` records
+5. Insert all `workflow_transition_definition` records
+6. Return the full `WorkflowDefinitionDetail`
+
+```typescript
+// From workflow-builder.tsx:676-687
+const response = await fetch(
+  `${resolveApiBaseUrl()}/api/v1/workflow-definitions`,
+  {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payloadPreview),
+  }
+)
+```
+
+<Note>
+  The definition is created with `status: "draft"` and `is_published: false`. You must publish it before it can execute instances.
+</Note>
+
+## Step 6: Publish the Workflow
+
+Click **Publish latest version** to activate the workflow:
+
+```python
+# From workflows.py:834-863
+cursor.execute(
+    "UPDATE workflow_definition_version SET is_published = false WHERE workflow_definition_id = %s",
+    (definition_id,),
+)
+cursor.execute(
+    "UPDATE workflow_definition_version SET is_published = true WHERE id = (...)",
+)
+cursor.execute(
+    "UPDATE workflow_definition SET status = 'active', updated_at = now() WHERE id = %s",
+    (definition_id,),
+)
+```
+
+This:
+- Unpublishes all previous versions
+- Marks the latest version as published
+- Sets the definition status to `active`
+
+## Common Workflows
+
+<AccordionGroup>
+  <Accordion title="Simple Approval Chain">
+    ```json
+    {
+      "steps": [
+        { "stepCode": "start", "stepType": "start" },
+        { "stepCode": "manager_review", "stepType": "human_task" },
+        { "stepCode": "director_review", "stepType": "human_task" },
+        { "stepCode": "approved", "stepType": "end", "isTerminal": true }
+      ],
+      "transitions": [
+        { "fromStepCode": "start", "toStepCode": "manager_review", "actionType": "approve" },
+        { "fromStepCode": "manager_review", "toStepCode": "director_review", "actionType": "approve" },
+        { "fromStepCode": "director_review", "toStepCode": "approved", "actionType": "approve" }
+      ]
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Approval with Rejection Path">
+    ```json
+    {
+      "steps": [
+        { "stepCode": "start", "stepType": "start" },
+        { "stepCode": "review", "stepType": "human_task" },
+        { "stepCode": "approved", "stepType": "end", "isTerminal": true },
+        { "stepCode": "rejected", "stepType": "end", "isTerminal": true }
+      ],
+      "transitions": [
+        { "fromStepCode": "start", "toStepCode": "review", "actionType": "approve" },
+        { "fromStepCode": "review", "toStepCode": "approved", "actionType": "approve" },
+        { "fromStepCode": "review", "toStepCode": "rejected", "actionType": "reject" }
+      ]
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Parallel Approval (approve_all)">
+    ```json
+    {
+      "steps": [
+        { 
+          "stepCode": "parallel_review", 
+          "stepType": "human_task",
+          "assignmentPolicy": {
+            "approvalMode": "approve_all"
+          },
+          "associations": [
+            { "associationType": "user", "associationValue": "user1@example.com" },
+            { "associationType": "user", "associationValue": "user2@example.com" },
+            { "associationType": "user", "associationValue": "user3@example.com" }
+          ]
+        }
+      ]
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Step Configuration" icon="gear" href="/builder/step-configuration">
+    Deep dive into step types, policies, and subworkflows
+  </Card>
+  <Card title="Transitions" icon="arrow-right" href="/builder/transitions">
+    Learn about conditional routing and action types
+  </Card>
+</CardGroup>

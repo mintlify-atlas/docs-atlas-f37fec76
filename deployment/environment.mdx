@@ -1,0 +1,348 @@
+---
+title: 'Environment Variables'
+description: 'Complete reference for all environment variables in the Workflow Engine Platform'
+---
+
+## Overview
+
+The Workflow Engine Platform uses environment variables for configuration across two main applications:
+
+- **Web Application** (`apps/web/.env.local`) - Next.js frontend
+- **API Service** (`apps/api/.env`) - FastAPI backend
+
+<Warning>
+  Both applications must connect to the **same PostgreSQL database** using different variable names.
+</Warning>
+
+## Web Application Variables
+
+Configuration file: `apps/web/.env.local`
+
+### Database Connection
+
+<ParamField path="DATABASE_URL" type="string" required>
+  PostgreSQL connection string for the Neon database.
+  
+  **Format:** `postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require`
+  
+  **Example:** `postgresql://myuser:mypass@ep-cool-meadow-123456.us-east-2.aws.neon.tech/neondb?sslmode=require`
+  
+  <Note>
+    Must point to the same database as `WORKFLOW_DATABASE_URL` in the API service.
+  </Note>
+</ParamField>
+
+### Authentication Configuration
+
+<ParamField path="BETTER_AUTH_SECRET" type="string" required>
+  Secret key for signing and verifying authentication tokens.
+  
+  **Generate with:** `openssl rand -base64 32`
+  
+  **Example:** `dGhpc2lzYXZlcnlzZWN1cmVzZWNyZXRrZXk=`
+  
+  <Warning>
+    Keep this secret secure. Use different values for development and production.
+  </Warning>
+</ParamField>
+
+<ParamField path="BETTER_AUTH_URL" type="string" required>
+  Base URL for the authentication service.
+  
+  **Development:** `http://localhost:3000`
+  
+  **Production:** `https://yourdomain.com`
+</ParamField>
+
+### Application URLs
+
+<ParamField path="NEXT_PUBLIC_APP_URL" type="string" required>
+  Public-facing URL for the web application (accessible in browser).
+  
+  **Development:** `http://localhost:3000`
+  
+  **Production:** `https://yourdomain.com`
+  
+  <Note>
+    The `NEXT_PUBLIC_` prefix makes this variable available in client-side code.
+  </Note>
+</ParamField>
+
+<ParamField path="NEXT_PUBLIC_API_BASE_URL" type="string" required>
+  Base URL for the API service.
+  
+  **Development:** `http://localhost:8000`
+  
+  **Production:** `https://api.yourdomain.com`
+</ParamField>
+
+### Example Web Configuration
+
+<CodeGroup>
+```bash Development
+DATABASE_URL=postgresql://user:pass@ep-example-123.us-east-2.aws.neon.tech/neondb?sslmode=require
+BETTER_AUTH_SECRET=your-generated-secret-here
+BETTER_AUTH_URL=http://localhost:3000
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+```
+
+```bash Production
+DATABASE_URL=postgresql://user:pass@ep-prod-456.us-east-2.aws.neon.tech/neondb?sslmode=require
+BETTER_AUTH_SECRET=production-secret-change-this
+BETTER_AUTH_URL=https://workflow.company.com
+NEXT_PUBLIC_APP_URL=https://workflow.company.com
+NEXT_PUBLIC_API_BASE_URL=https://api-workflow.company.com
+```
+</CodeGroup>
+
+## API Service Variables
+
+Configuration file: `apps/api/.env`
+
+### Database Connection
+
+<ParamField path="WORKFLOW_DATABASE_URL" type="string" required>
+  PostgreSQL connection string for the Neon database.
+  
+  **Format:** `postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require`
+  
+  <Warning>
+    Must match the same database as `DATABASE_URL` in the web application.
+  </Warning>
+</ParamField>
+
+### Message Queue Configuration
+
+<ParamField path="RABBITMQ_URL" type="string" required>
+  AMQP connection URL for RabbitMQ.
+  
+  **Development:** `amqp://workflow:workflow@localhost:5672/`
+  
+  **Production:** `amqp://username:password@rabbitmq.internal:5672/`
+  
+  <Note>
+    Default credentials are set in `infra/docker-compose.yml`
+  </Note>
+</ParamField>
+
+<ParamField path="OUTBOX_EXCHANGE" type="string" default="workflow.events">
+  Name of the RabbitMQ exchange for outbox events.
+  
+  The exchange uses a **topic** routing pattern with durable persistence.
+</ParamField>
+
+### Outbox Worker Configuration
+
+These variables control the behavior of the outbox event publisher worker.
+
+<ParamField path="OUTBOX_BATCH_SIZE" type="integer" default="100">
+  Maximum number of events to process in a single batch.
+  
+  Higher values improve throughput but increase memory usage.
+</ParamField>
+
+<ParamField path="OUTBOX_POLL_INTERVAL_SECONDS" type="float" default="0.5">
+  Interval between polling the database for new events (in seconds).
+  
+  Lower values reduce latency but increase database load.
+</ParamField>
+
+<ParamField path="OUTBOX_CLAIM_TTL_SECONDS" type="integer" default="60">
+  Time-to-live for claimed events before they're considered stale and can be reclaimed.
+  
+  Prevents events from being stuck in processing state if a worker crashes.
+</ParamField>
+
+<ParamField path="OUTBOX_MAX_ATTEMPTS_DEFAULT" type="integer" default="20">
+  Default maximum retry attempts for failed events.
+  
+  After this many failures, events move to `dead_letter` status.
+</ParamField>
+
+### Priority Release Worker Configuration
+
+These variables control the priority chain escalation worker.
+
+<ParamField path="PRIORITY_RELEASE_BATCH_SIZE" type="integer" default="100">
+  Maximum number of priority tasks to release in a single batch.
+</ParamField>
+
+<ParamField path="PRIORITY_RELEASE_POLL_INTERVAL_SECONDS" type="integer" default="5">
+  Interval between checking for tasks ready to escalate (in seconds).
+</ParamField>
+
+<ParamField path="PRIORITY_RELEASE_ADVISORY_LOCK_ID" type="integer" default="54001">
+  PostgreSQL advisory lock ID to ensure only one worker processes releases at a time.
+  
+  <Note>
+    Change this if you have other advisory locks in your database to avoid conflicts.
+  </Note>
+</ParamField>
+
+### Realtime Configuration
+
+<ParamField path="REALTIME_CHANNEL" type="string" default="workflow_realtime">
+  PostgreSQL LISTEN/NOTIFY channel name for realtime updates.
+</ParamField>
+
+<ParamField path="REALTIME_DATABASE_URL" type="string">
+  Optional separate connection string for realtime subscriptions.
+  
+  Leave empty to use the main `WORKFLOW_DATABASE_URL`.
+</ParamField>
+
+<ParamField path="REALTIME_HEARTBEAT_SECONDS" type="integer" default="15">
+  Interval for sending heartbeat messages on realtime connections.
+</ParamField>
+
+### Authentication Integration
+
+<ParamField path="WEB_APP_URL" type="string" required>
+  Base URL of the web application.
+  
+  **Development:** `http://localhost:3000`
+  
+  **Production:** `https://yourdomain.com`
+</ParamField>
+
+<ParamField path="BETTER_AUTH_ISSUER" type="string" required>
+  JWT token issuer URL for Better Auth.
+  
+  Should match `WEB_APP_URL` in most cases.
+</ParamField>
+
+<ParamField path="BETTER_AUTH_AUDIENCE" type="string" required>
+  JWT token audience for Better Auth.
+  
+  Should match `WEB_APP_URL` in most cases.
+</ParamField>
+
+<ParamField path="BETTER_AUTH_JWKS_URL" type="string" required>
+  URL to fetch JSON Web Key Set for token verification.
+  
+  **Format:** `{WEB_APP_URL}/api/auth/jwks`
+  
+  **Example:** `http://localhost:3000/api/auth/jwks`
+</ParamField>
+
+### Example API Configuration
+
+<CodeGroup>
+```bash Development
+WORKFLOW_DATABASE_URL=postgresql://user:pass@ep-example-123.us-east-2.aws.neon.tech/neondb?sslmode=require
+RABBITMQ_URL=amqp://workflow:workflow@localhost:5672/
+OUTBOX_EXCHANGE=workflow.events
+OUTBOX_BATCH_SIZE=100
+OUTBOX_POLL_INTERVAL_SECONDS=0.5
+OUTBOX_CLAIM_TTL_SECONDS=60
+OUTBOX_MAX_ATTEMPTS_DEFAULT=20
+REALTIME_CHANNEL=workflow_realtime
+REALTIME_DATABASE_URL=
+REALTIME_HEARTBEAT_SECONDS=15
+PRIORITY_RELEASE_BATCH_SIZE=100
+PRIORITY_RELEASE_POLL_INTERVAL_SECONDS=5
+PRIORITY_RELEASE_ADVISORY_LOCK_ID=54001
+WEB_APP_URL=http://localhost:3000
+BETTER_AUTH_ISSUER=http://localhost:3000
+BETTER_AUTH_AUDIENCE=http://localhost:3000
+BETTER_AUTH_JWKS_URL=http://localhost:3000/api/auth/jwks
+```
+
+```bash Production
+WORKFLOW_DATABASE_URL=postgresql://user:pass@ep-prod-456.us-east-2.aws.neon.tech/neondb?sslmode=require
+RABBITMQ_URL=amqp://produser:securepass@rabbitmq.internal:5672/
+OUTBOX_EXCHANGE=workflow.events
+OUTBOX_BATCH_SIZE=200
+OUTBOX_POLL_INTERVAL_SECONDS=1
+OUTBOX_CLAIM_TTL_SECONDS=120
+OUTBOX_MAX_ATTEMPTS_DEFAULT=50
+REALTIME_CHANNEL=workflow_realtime
+REALTIME_DATABASE_URL=
+REALTIME_HEARTBEAT_SECONDS=30
+PRIORITY_RELEASE_BATCH_SIZE=200
+PRIORITY_RELEASE_POLL_INTERVAL_SECONDS=10
+PRIORITY_RELEASE_ADVISORY_LOCK_ID=54001
+WEB_APP_URL=https://workflow.company.com
+BETTER_AUTH_ISSUER=https://workflow.company.com
+BETTER_AUTH_AUDIENCE=https://workflow.company.com
+BETTER_AUTH_JWKS_URL=https://workflow.company.com/api/auth/jwks
+```
+</CodeGroup>
+
+## Production Considerations
+
+<AccordionGroup>
+  <Accordion title="Database URLs Must Match">
+    The web application's `DATABASE_URL` and API service's `WORKFLOW_DATABASE_URL` **must point to the same database**.
+    
+    Mismatched databases will cause:
+    - Authentication failures
+    - Data inconsistencies
+    - Workflow execution errors
+  </Accordion>
+  
+  <Accordion title="Secure Secret Generation">
+    For `BETTER_AUTH_SECRET`, use a cryptographically secure random string:
+    
+    ```bash
+    # Generate 32-byte base64-encoded secret
+    openssl rand -base64 32
+    
+    # Or generate a hex secret
+    openssl rand -hex 32
+    ```
+    
+    **Never** reuse secrets between environments.
+  </Accordion>
+  
+  <Accordion title="RabbitMQ Credentials">
+    Change the default RabbitMQ credentials in production:
+    
+    1. Update `infra/docker-compose.yml` or use a managed RabbitMQ service
+    2. Use strong passwords
+    3. Consider using TLS: `amqps://user:pass@host:5671/`
+  </Accordion>
+  
+  <Accordion title="Worker Tuning">
+    Adjust worker parameters based on load:
+    
+    **High Throughput:**
+    - Increase `OUTBOX_BATCH_SIZE` (200-500)
+    - Increase `PRIORITY_RELEASE_BATCH_SIZE` (200-500)
+    - Decrease poll intervals (0.1-1 seconds)
+    
+    **Resource Constrained:**
+    - Decrease batch sizes (50-100)
+    - Increase poll intervals (5-10 seconds)
+    - Increase `OUTBOX_CLAIM_TTL_SECONDS` to handle slower processing
+  </Accordion>
+  
+  <Accordion title="URL Configuration">
+    Ensure all URLs are consistent:
+    
+    | Variable | Web .env.local | API .env |
+    |----------|----------------|----------|
+    | App URL | `NEXT_PUBLIC_APP_URL` | `WEB_APP_URL`, `BETTER_AUTH_ISSUER`, `BETTER_AUTH_AUDIENCE` |
+    | API URL | `NEXT_PUBLIC_API_BASE_URL` | - |
+    | Database | `DATABASE_URL` | `WORKFLOW_DATABASE_URL` |
+  </Accordion>
+</AccordionGroup>
+
+## Environment File Templates
+
+Template files are provided in the repository:
+
+- `apps/web/.env.example` - Web application template
+- `apps/api/.env.example` - API service template
+
+Copy and customize these files:
+
+```bash
+cp apps/web/.env.example apps/web/.env.local
+cp apps/api/.env.example apps/api/.env
+```
+
+<Warning>
+  Never commit `.env.local` or `.env` files to version control. They are included in `.gitignore`.
+</Warning>

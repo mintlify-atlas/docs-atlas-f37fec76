@@ -1,0 +1,430 @@
+---
+title: Server-Sent Events
+api: GET /api/v1/events
+---
+
+Establishes a persistent Server-Sent Events (SSE) connection to receive real-time updates about workflow instances, tasks, and notifications. This endpoint streams events as they occur, enabling reactive UI updates without polling.
+
+## Authentication
+
+Requires Bearer token authentication. Only events relevant to the authenticated user are delivered.
+
+## Connection
+
+This endpoint uses the Server-Sent Events (SSE) protocol:
+- Content-Type: `text/event-stream`
+- Connection: `keep-alive`
+- Events are delivered as they occur
+- Automatic reconnection is handled by the browser
+- Heartbeat messages keep the connection alive
+
+## Event Types
+
+### Connected Event
+
+Sent immediately upon connection establishment:
+
+```
+event: connected
+id: evt-abc123
+data: {"id":"evt-abc123","type":"realtime.connected","channels":[],"users":["user-123"],"broadcast":false,"occurredAt":"2024-03-14T10:30:00Z"}
+```
+
+### Runtime Events
+
+Sent when workflow state changes:
+
+```
+event: realtime
+id: evt-def456
+data: {"id":"evt-def456","type":"runtime.workflow.changed","channels":["instances","tasks"],"workflowInstanceId":"123e4567-e89b-12d3-a456-426614174000","broadcast":true,"occurredAt":"2024-03-14T10:31:15Z"}
+```
+
+### Heartbeat
+
+Keep-alive messages sent every 30 seconds (default):
+
+```
+: keepalive
+```
+
+## Event Payload Fields
+
+<ResponseField name="id" type="string">
+  Unique identifier for the event.
+</ResponseField>
+
+<ResponseField name="type" type="string">
+  Event type:
+  - `realtime.connected` - Connection established
+  - `runtime.workflow.changed` - Workflow state changed
+  - `runtime.tasks.changed` - Task state changed
+  - `runtime.notifications.changed` - Notification created or updated
+  - `runtime.instances.changed` - Workflow instance updated
+</ResponseField>
+
+<ResponseField name="channels" type="array">
+  Channel names this event belongs to (e.g., `["instances", "tasks", "notifications"]`).
+</ResponseField>
+
+<ResponseField name="users" type="array">
+  User IDs this event is targeted to. Empty if broadcast.
+</ResponseField>
+
+<ResponseField name="broadcast" type="boolean">
+  Whether this event is broadcast to all connected users.
+</ResponseField>
+
+<ResponseField name="workflowInstanceId" type="string | null">
+  Associated workflow instance ID (if applicable).
+</ResponseField>
+
+<ResponseField name="notificationId" type="string | null">
+  Associated notification ID (if applicable).
+</ResponseField>
+
+<ResponseField name="occurredAt" type="string">
+  ISO 8601 timestamp when the event occurred.
+</ResponseField>
+
+## Example Request
+
+<CodeGroup>
+
+```bash cURL
+curl -N -H "Authorization: Bearer YOUR_TOKEN" \
+  https://api.example.com/api/v1/events
+```
+
+```javascript JavaScript (EventSource)
+const eventSource = new EventSource(
+  'https://api.example.com/api/v1/events',
+  {
+    headers: {
+      'Authorization': 'Bearer YOUR_TOKEN'
+    }
+  }
+);
+
+eventSource.addEventListener('connected', (event) => {
+  const data = JSON.parse(event.data);
+  console.log('Connected to realtime events:', data);
+});
+
+eventSource.addEventListener('realtime', (event) => {
+  const payload = JSON.parse(event.data);
+  console.log('Received event:', payload);
+  
+  switch (payload.type) {
+    case 'runtime.workflow.changed':
+      handleWorkflowUpdate(payload.workflowInstanceId);
+      break;
+    case 'runtime.tasks.changed':
+      refreshTaskList();
+      break;
+    case 'runtime.notifications.changed':
+      updateNotificationBadge();
+      break;
+  }
+});
+
+eventSource.onerror = (error) => {
+  console.error('EventSource error:', error);
+  // Browser will automatically reconnect
+};
+```
+
+```javascript JavaScript (fetch with streams)
+const response = await fetch('https://api.example.com/api/v1/events', {
+  headers: {
+    'Authorization': 'Bearer YOUR_TOKEN'
+  }
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  
+  const chunk = decoder.decode(value);
+  const lines = chunk.split('\n\n');
+  
+  for (const line of lines) {
+    if (line.startsWith('data: ')) {
+      const data = JSON.parse(line.substring(6));
+      console.log('Event received:', data);
+    }
+  }
+}
+```
+
+```python Python
+import requests
+import json
+
+response = requests.get(
+    'https://api.example.com/api/v1/events',
+    headers={'Authorization': 'Bearer YOUR_TOKEN'},
+    stream=True
+)
+
+for line in response.iter_lines():
+    if line:
+        decoded_line = line.decode('utf-8')
+        if decoded_line.startswith('data: '):
+            data = json.loads(decoded_line[6:])
+            print(f"Event received: {data['type']}")
+            
+            if data['type'] == 'runtime.tasks.changed':
+                # Refresh task list
+                refresh_tasks()
+            elif data['type'] == 'runtime.notifications.changed':
+                # Update notification count
+                update_notification_count()
+```
+
+</CodeGroup>
+
+## Example Events
+
+### Connection Established
+
+```json
+{
+  "id": "evt-abc123",
+  "type": "realtime.connected",
+  "channels": [],
+  "users": ["user-123"],
+  "broadcast": false,
+  "occurredAt": "2024-03-14T10:30:00Z"
+}
+```
+
+### Task Assigned
+
+```json
+{
+  "id": "evt-task-001",
+  "type": "runtime.tasks.changed",
+  "channels": ["instances", "tasks"],
+  "users": [],
+  "broadcast": true,
+  "workflowInstanceId": "123e4567-e89b-12d3-a456-426614174000",
+  "occurredAt": "2024-03-14T10:31:15Z"
+}
+```
+
+### Notification Created
+
+```json
+{
+  "id": "evt-notif-001",
+  "type": "runtime.notifications.changed",
+  "channels": ["notifications"],
+  "users": ["user-123"],
+  "broadcast": false,
+  "workflowInstanceId": "123e4567-e89b-12d3-a456-426614174000",
+  "notificationId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "occurredAt": "2024-03-14T10:31:20Z"
+}
+```
+
+### Workflow Completed
+
+```json
+{
+  "id": "evt-workflow-001",
+  "type": "runtime.workflow.changed",
+  "channels": ["instances", "tasks"],
+  "users": [],
+  "broadcast": true,
+  "workflowInstanceId": "234e5678-e89b-12d3-a456-426614174001",
+  "occurredAt": "2024-03-14T10:35:00Z"
+}
+```
+
+## Status Codes
+
+<ResponseField name="200" type="OK">
+  Connection established successfully. Events will be streamed.
+</ResponseField>
+
+<ResponseField name="401" type="Unauthorized">
+  Missing or invalid authentication token.
+</ResponseField>
+
+## Event Delivery
+
+### Targeting
+
+Events are delivered based on:
+
+1. **Broadcast events** (`broadcast: true`) - Delivered to all connected users
+2. **User-specific events** (`users: ["user-123"]`) - Delivered only to specified users
+3. **Channel filtering** - Client can filter events by channel locally
+
+### Reliability
+
+- Events are delivered in order
+- If connection drops, browser automatically reconnects
+- Events that occurred during disconnection are not replayed (events are ephemeral)
+- Use event `id` to track which events have been processed
+
+### Performance
+
+- Heartbeat interval: 30 seconds (configurable)
+- Connection timeout: Handled by browser/client
+- No message queue - events are sent immediately
+- Missed events during disconnection require polling the REST API
+
+## Use Cases
+
+### Live Task Dashboard
+
+Update task list in real-time:
+
+```javascript
+const eventSource = new EventSource(
+  'https://api.example.com/api/v1/events',
+  {
+    headers: { 'Authorization': `Bearer ${token}` }
+  }
+);
+
+eventSource.addEventListener('realtime', async (event) => {
+  const payload = JSON.parse(event.data);
+  
+  if (payload.type === 'runtime.tasks.changed') {
+    // Refresh task list
+    const response = await fetch('/api/v1/me/tasks', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    const tasks = await response.json();
+    updateTaskList(tasks.items);
+  }
+});
+```
+
+### Notification Bell Badge
+
+Update notification count badge:
+
+```javascript
+eventSource.addEventListener('realtime', async (event) => {
+  const payload = JSON.parse(event.data);
+  
+  if (payload.type === 'runtime.notifications.changed') {
+    // Fetch updated notification count
+    const response = await fetch('/api/v1/me/notifications', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    const notifications = await response.json();
+    const unreadCount = notifications.items.filter(n => !n.isRead).length;
+    
+    // Update badge
+    document.getElementById('notification-badge').textContent = unreadCount;
+  }
+});
+```
+
+### Workflow Instance Monitor
+
+Monitor specific workflow instance:
+
+```javascript
+const workflowId = '123e4567-e89b-12d3-a456-426614174000';
+
+eventSource.addEventListener('realtime', async (event) => {
+  const payload = JSON.parse(event.data);
+  
+  if (
+    payload.workflowInstanceId === workflowId &&
+    payload.type === 'runtime.workflow.changed'
+  ) {
+    // Fetch updated workflow details
+    const response = await fetch(`/api/v1/workflow-instances/${workflowId}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    const workflow = await response.json();
+    updateWorkflowView(workflow.item);
+  }
+});
+```
+
+### Reconnection Handling
+
+Handle connection errors and reconnection:
+
+```javascript
+let eventSource;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+
+function connect() {
+  eventSource = new EventSource(
+    'https://api.example.com/api/v1/events',
+    {
+      headers: { 'Authorization': `Bearer ${token}` }
+    }
+  );
+  
+  eventSource.addEventListener('connected', () => {
+    console.log('Connected to realtime events');
+    reconnectAttempts = 0;
+    showConnectionStatus('connected');
+  });
+  
+  eventSource.addEventListener('realtime', handleRealtimeEvent);
+  
+  eventSource.onerror = (error) => {
+    console.error('EventSource error:', error);
+    eventSource.close();
+    
+    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      reconnectAttempts++;
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+      showConnectionStatus('reconnecting', delay);
+      setTimeout(connect, delay);
+    } else {
+      showConnectionStatus('failed');
+    }
+  };
+}
+
+connect();
+```
+
+### Channel-based Filtering
+
+Filter events by channel:
+
+```javascript
+const channelHandlers = {
+  instances: (payload) => {
+    console.log('Instance event:', payload);
+    refreshInstanceList();
+  },
+  tasks: (payload) => {
+    console.log('Task event:', payload);
+    refreshTaskList();
+  },
+  notifications: (payload) => {
+    console.log('Notification event:', payload);
+    updateNotificationBadge();
+  }
+};
+
+eventSource.addEventListener('realtime', (event) => {
+  const payload = JSON.parse(event.data);
+  
+  // Handle event for each channel it belongs to
+  payload.channels.forEach(channel => {
+    const handler = channelHandlers[channel];
+    if (handler) {
+      handler(payload);
+    }
+  });
+});
+```

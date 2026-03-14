@@ -1,0 +1,505 @@
+---
+title: Steps
+description: Understanding workflow steps and step instances in the Workflow Engine
+---
+
+## Overview
+
+Steps are the building blocks of workflows. Each step represents a distinct stage in a business process, with specific behavior, assignment rules, and transition logic.
+
+## Step Types
+
+The platform supports six core step types:
+
+```python
+StepType = Literal[
+    "start",        # Entry point (exactly one required)
+    "end",          # Terminal step
+    "human_task",   # Requires user action
+    "system_task",  # Automated processing
+    "subworkflow",  # Launches child workflow
+    "decision"      # Conditional routing
+]
+```
+
+### Step Type Behavior
+
+<AccordionGroup>
+  <Accordion title="start" icon="play">
+    The entry point of every workflow. Validation ensures exactly one start step exists. The start step is automatically entered when a workflow instance begins.
+    
+    **Validation**: `workflows.py:79-81`
+    ```python
+    start_steps = [step.stepCode for step in payload.steps if step.stepType == "start"]
+    if len(start_steps) != 1:
+        errors.append("Exactly one start step is required.")
+    ```
+  </Accordion>
+  
+  <Accordion title="end" icon="flag-checkered">
+    Terminal steps that complete the workflow. When an end step is entered, the workflow status transitions to `completed` or `rejected` based on the triggering action.
+    
+    **Implementation**: `runtime.py:885-887`
+    ```python
+    if step_definition["step_type"] in {"end"} or step_definition["is_terminal"]:
+        _complete_workflow(cursor, workflow_instance, step_instance, trigger_action)
+        return {"step_instance_id": step_instance["id"], "next_step_code": None}
+    ```
+  </Accordion>
+  
+  <Accordion title="human_task" icon="user">
+    Steps requiring human intervention. The workflow pauses and creates actionable tasks for assigned users. Supports multiple approval modes and escalation policies.
+    
+    **Implementation**: `runtime.py:889-894`
+    ```python
+    if step_definition["step_type"] == "human_task":
+        _create_human_tasks(cursor, workflow_instance, step_instance, step_definition)
+        return {
+            "step_instance_id": step_instance["id"],
+            "next_step_code": step_definition["step_code"],
+        }
+    ```
+  </Accordion>
+  
+  <Accordion title="system_task" icon="robot">
+    Automated steps that execute immediately without user intervention. Used for data transformation, API calls, or business logic evaluation.
+  </Accordion>
+  
+  <Accordion title="subworkflow" icon="diagram-project">
+    Steps that launch a child workflow and pause the parent until the child completes. See [Subworkflows](/concepts/subworkflows) for details.
+    
+    **Implementation**: `runtime.py:896-931`
+  </Accordion>
+  
+  <Accordion title="decision" icon="code-branch">
+    Conditional routing steps that evaluate expressions or conditions to determine the next path.
+  </Accordion>
+</AccordionGroup>
+
+## Step Definition Schema
+
+### Pydantic Model
+
+```python
+class WorkflowStepInput(BaseModel):
+    stepCode: str = Field(min_length=1)
+    stepLabel: str = Field(min_length=1)
+    description: str = ""
+    stepType: StepType
+    sequenceHint: int = 0
+    allowRevert: bool = True
+    remarkRequiredOnApprove: bool = False
+    remarkRequiredOnReject: bool = False
+    remarkRequiredOnRevert: bool = False
+    maxVisitsPerInstance: int | None = None
+    formSchema: dict = Field(default_factory=dict)
+    config: dict = Field(default_factory=dict)
+    isTerminal: bool = False
+    notificationTemplate: WorkflowNotificationTemplateInput | None = None
+    subworkflowMapping: WorkflowStepMappingInput | None = None
+    assignmentPolicy: WorkflowAssignmentPolicyInput = Field(
+        default_factory=WorkflowAssignmentPolicyInput
+    )
+    associations: list[WorkflowAssociationInput] = Field(default_factory=list)
+```
+
+### Database Schema
+
+```sql
+CREATE TABLE workflow_step_definition (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    workflow_version_id uuid NOT NULL REFERENCES workflow_definition_version(id),
+    step_code text NOT NULL,
+    step_label text NOT NULL,
+    description text,
+    step_type text NOT NULL,
+    sequence_hint integer,
+    allow_revert boolean NOT NULL DEFAULT true,
+    remark_required_on_approve boolean NOT NULL DEFAULT false,
+    remark_required_on_reject boolean NOT NULL DEFAULT false,
+    remark_required_on_revert boolean NOT NULL DEFAULT false,
+    max_visits_per_instance integer,
+    form_schema jsonb NOT NULL DEFAULT '{}'::jsonb,
+    config jsonb NOT NULL DEFAULT '{}'::jsonb,
+    is_terminal boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (workflow_version_id, step_code)
+);
+```
+
+## Step Properties
+
+### Core Fields
+
+<ResponseField name="stepCode" type="string" required>
+  Unique identifier within the workflow version (e.g., `submit`, `manager_review`, `finance_approval`)
+</ResponseField>
+
+<ResponseField name="stepLabel" type="string" required>
+  Human-readable display name shown in UI
+</ResponseField>
+
+<ResponseField name="stepType" type="StepType" required>
+  Determines step behavior: `start`, `end`, `human_task`, `system_task`, `subworkflow`, or `decision`
+</ResponseField>
+
+<ResponseField name="sequenceHint" type="integer">
+  Visual ordering hint for the workflow builder (does not affect execution order)
+</ResponseField>
+
+### Revert Control
+
+<ResponseField name="allowRevert" type="boolean" default="true">
+  Whether users can revert the workflow back to this step
+</ResponseField>
+
+```python
+# Revert transitions are filtered based on this flag
+# From runtime.py:289-302
+def _available_actions(cursor, workflow_version_id, from_step_definition_id, allow_revert: bool):
+    cursor.execute(
+        """SELECT DISTINCT action_type FROM workflow_transition_definition
+           WHERE workflow_version_id = %s AND from_step_definition_id = %s""",
+        (workflow_version_id, from_step_definition_id)
+    )
+    actions = [row["action_type"] for row in cursor.fetchall()]
+    if not allow_revert:
+        actions = [action for action in actions if action != "revert"]
+    return actions
+```
+
+### Remark Requirements
+
+<ResponseField name="remarkRequiredOnApprove" type="boolean" default="false">
+  Force users to provide a comment when approving
+</ResponseField>
+
+<ResponseField name="remarkRequiredOnReject" type="boolean" default="false">
+  Force users to provide a comment when rejecting
+</ResponseField>
+
+<ResponseField name="remarkRequiredOnRevert" type="boolean" default="false">
+  Force users to provide a comment when reverting
+</ResponseField>
+
+<Note>
+Remark validation is enforced in `runtime.py:1256-1263` before processing task actions.
+</Note>
+
+### Loop Guards
+
+<ResponseField name="maxVisitsPerInstance" type="integer" optional>
+  Maximum times this step can be visited in a single workflow instance. Required for steps in loops.
+</ResponseField>
+
+```python
+# Visit count tracking in runtime.py:277-286
+def _get_next_visit_count(cursor, workflow_instance_id, step_definition_id) -> int:
+    cursor.execute(
+        """SELECT COUNT(*) AS count FROM step_instance
+           WHERE workflow_instance_id = %s AND step_definition_id = %s""",
+        (workflow_instance_id, step_definition_id)
+    )
+    return cursor.fetchone()["count"] + 1
+```
+
+<Warning>
+Steps in cycles must have `maxVisitsPerInstance` set to prevent infinite loops. The validator rejects cycles without visit guards.
+</Warning>
+
+### Terminal Steps
+
+<ResponseField name="isTerminal" type="boolean" default="false">
+  Mark non-end steps as terminal (workflow completes when reached)
+</ResponseField>
+
+### Configuration
+
+<ResponseField name="formSchema" type="object">
+  JSON Schema defining the input form structure for human tasks
+</ResponseField>
+
+<ResponseField name="config" type="object">
+  Step-specific configuration (handler params, retry policy, UI settings)
+</ResponseField>
+
+## Step Instances
+
+Each time a workflow enters a step, a step instance is created. This allows tracking revisits (after revert) and multiple attempts.
+
+### Runtime Schema
+
+```sql
+CREATE TABLE step_instance (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    workflow_instance_id uuid NOT NULL REFERENCES workflow_instance(id),
+    step_definition_id uuid NOT NULL REFERENCES workflow_step_definition(id),
+    attempt_no integer NOT NULL DEFAULT 1,
+    visit_count integer NOT NULL DEFAULT 1,
+    status text NOT NULL DEFAULT 'pending',
+    entered_at timestamptz NOT NULL DEFAULT now(),
+    started_at timestamptz,
+    completed_at timestamptz,
+    waiting_since timestamptz,
+    actor_user_id text REFERENCES "user"(id),
+    result_action text,
+    result_payload jsonb,
+    error_payload jsonb
+);
+```
+
+### Step Instance Status
+
+```python
+StepStatus = Literal[
+    "pending",     # Created but not started
+    "active",      # Currently processing
+    "waiting",     # Paused on human task or subworkflow
+    "completed",   # Successfully finished
+    "rejected",    # Terminated via rejection
+    "reverted",    # Reverted to previous step
+    "failed",      # Failed due to error
+    "cancelled"    # Manually cancelled
+]
+```
+
+### Creating Step Instances
+
+Step instances are created when the workflow engine enters a step:
+
+```python
+# From runtime.py:855-883
+def _enter_step(cursor, workflow_instance, step_definition, trigger_action: str = "approve"):
+    visit_count = _get_next_visit_count(cursor, workflow_instance["id"], step_definition["id"])
+
+    cursor.execute(
+        """INSERT INTO step_instance (
+            workflow_instance_id,
+            step_definition_id,
+            attempt_no,
+            visit_count,
+            status,
+            entered_at,
+            started_at
+        ) VALUES (%s, %s, 1, %s, 'active', now(), now())
+        RETURNING *""",
+        (workflow_instance["id"], step_definition["id"], visit_count)
+    )
+    step_instance = cursor.fetchone()
+    
+    # Update workflow pointer to current step
+    cursor.execute(
+        """UPDATE workflow_instance
+           SET current_step_instance_id = %s, updated_at = now()
+           WHERE id = %s""",
+        (step_instance["id"], workflow_instance["id"])
+    )
+```
+
+## Step Associations
+
+Associations define who can act on a step. They support users, roles, groups, and SQL-based rules.
+
+### Association Schema
+
+```sql
+CREATE TABLE workflow_step_association (
+    id uuid PRIMARY KEY,
+    step_definition_id uuid NOT NULL REFERENCES workflow_step_definition(id),
+    association_type text NOT NULL,  -- 'user', 'role', 'group', 'sql_rule'
+    association_value text NOT NULL,
+    can_approve boolean NOT NULL DEFAULT true,
+    can_reject boolean NOT NULL DEFAULT true,
+    can_revert boolean NOT NULL DEFAULT true,
+    priority integer,
+    notification_order integer,
+    escalation_after_seconds integer,
+    is_active boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+### Association Types
+
+```python
+AssociationType = Literal["user", "role", "group", "sql_rule"]
+
+class WorkflowAssociationInput(BaseModel):
+    associationType: AssociationType
+    associationValue: str = Field(min_length=1)
+    canApprove: bool = True
+    canReject: bool = True
+    canRevert: bool = True
+    priority: int | None = None
+    notificationOrder: int | None = None
+    escalationAfterSeconds: int | None = None
+```
+
+### Association Examples
+
+<CodeGroup>
+```json User Association
+{
+  "associationType": "user",
+  "associationValue": "manager@example.com",
+  "canApprove": true,
+  "canReject": true,
+  "canRevert": false,
+  "priority": 1
+}
+```
+
+```json Role Association
+{
+  "associationType": "role",
+  "associationValue": "finance_approver",
+  "canApprove": true,
+  "canReject": true,
+  "priority": 2,
+  "escalationAfterSeconds": 86400
+}
+```
+
+```json Group Association
+{
+  "associationType": "group",
+  "associationValue": "engineering_team",
+  "canApprove": true,
+  "canReject": false,
+  "notificationOrder": 1
+}
+```
+</CodeGroup>
+
+## Assignment Policy
+
+Each human_task step has an assignment policy that controls how tasks are distributed and approved.
+
+### Policy Schema
+
+```sql
+CREATE TABLE workflow_step_assignment_policy (
+    id uuid PRIMARY KEY,
+    step_definition_id uuid NOT NULL UNIQUE REFERENCES workflow_step_definition(id),
+    approval_mode text NOT NULL DEFAULT 'priority_chain',
+    required_approvals_count integer,
+    priority_escalation_enabled boolean NOT NULL DEFAULT false,
+    escalation_timeout_seconds integer,
+    reminder_interval_seconds integer,
+    max_escalation_count integer,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+### Approval Modes
+
+```python
+ApprovalMode = Literal[
+    "priority_chain",   # Notify highest priority first, escalate on timeout
+    "approve_any_one",  # First approval completes the step
+    "approve_all",      # All assignees must approve
+    "notify_all"        # Notify everyone, policy determines completion
+]
+```
+
+<AccordionGroup>
+  <Accordion title="priority_chain">
+    Tasks are created in priority order. Only the highest priority task is `open`, others are `queued`. When a task is completed or times out, the next priority task opens.
+    
+    **Use case**: Sequential approval chain (requester → manager → director → CFO)
+  </Accordion>
+  
+  <Accordion title="approve_any_one">
+    All tasks are created as `open`. The first approval completes the step, remaining tasks are cancelled.
+    
+    **Use case**: Any team member can approve (support ticket assignment)
+  </Accordion>
+  
+  <Accordion title="approve_all">
+    All tasks are created as `open`. Every assignee must approve before the step completes.
+    
+    **Use case**: Multi-signature approval (compliance review requiring legal + security)
+  </Accordion>
+  
+  <Accordion title="notify_all">
+    All assignees are notified, but the policy's `required_approvals_count` determines completion.
+    
+    **Use case**: Quorum voting (3 of 5 board members must approve)
+  </Accordion>
+</AccordionGroup>
+
+### Policy Example
+
+```python
+class WorkflowAssignmentPolicyInput(BaseModel):
+    approvalMode: ApprovalMode = "priority_chain"
+    requiredApprovalsCount: int | None = None
+    priorityEscalationEnabled: bool = False
+    escalationTimeoutSeconds: int | None = None
+    reminderIntervalSeconds: int | None = None
+    maxEscalationCount: int | None = None
+```
+
+## Step Storage and Retrieval
+
+### Creating Steps
+
+Steps are persisted when a workflow version is created:
+
+```python
+# From workflows.py:494-535
+for step in payload.steps:
+    cursor.execute(
+        """INSERT INTO workflow_step_definition (
+            workflow_version_id, step_code, step_label, description,
+            step_type, sequence_hint, allow_revert,
+            remark_required_on_approve, remark_required_on_reject,
+            remark_required_on_revert, max_visits_per_instance,
+            form_schema, config, is_terminal
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id""",
+        (version_id, step.stepCode, step.stepLabel, step.description,
+         step.stepType, step.sequenceHint, step.allowRevert,
+         step.remarkRequiredOnApprove, step.remarkRequiredOnReject,
+         step.remarkRequiredOnRevert, step.maxVisitsPerInstance,
+         Json(step.formSchema), Json(step.config), step.isTerminal)
+    )
+    step_id = cursor.fetchone()["id"]
+    step_id_by_code[step.stepCode] = step_id
+```
+
+### Loading Step Definitions
+
+Steps are loaded with their associations, policies, and templates:
+
+```python
+# From workflows.py:232-390
+cursor.execute(
+    """SELECT * FROM workflow_step_definition
+       WHERE workflow_version_id = %s
+       ORDER BY sequence_hint, created_at""",
+    (version_id,)
+)
+step_rows = cursor.fetchall()
+
+# Load related data
+associations_by_step = load_associations(step_ids)
+policy_by_step = load_policies(step_ids)
+mapping_by_step = load_mappings(step_ids)
+notification_by_step = load_notifications(step_ids)
+```
+
+<Card title="Related Concepts" icon="link">
+  - [Transitions](/concepts/transitions) - Connections between steps
+  - [Human Tasks](/concepts/human-tasks) - User assignments and approvals
+  - [Subworkflows](/concepts/subworkflows) - Child workflow execution
+  - [Notifications](/concepts/notifications) - Task notification system
+</Card>
+
+## Implementation References
+
+- **Step Creation**: `apps/api/src/api/workflows.py:494-651`
+- **Step Entry Logic**: `apps/api/src/api/runtime.py:855-956`
+- **Step Validation**: `apps/api/src/api/workflows.py:72-192`
+- **Schema Definitions**: `apps/api/src/api/workflow_schemas.py:52-72`
+- **Database Schema**: `infra/postgres/init/01_foundation.sql:86-104`

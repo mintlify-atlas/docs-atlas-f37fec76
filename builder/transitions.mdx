@@ -1,0 +1,489 @@
+---
+title: Transitions
+description: Define routing logic between workflow steps with actions, conditions, and priorities
+---
+
+Transitions define the **edges** in your workflow graph. They specify which steps connect to which, under what conditions, and using which actions.
+
+## Transition Schema
+
+The complete transition schema is defined in `workflow_schemas.py:74-82`:
+
+```python
+class WorkflowTransitionInput(BaseModel):
+    fromStepCode: str = Field(min_length=1)
+    toStepCode: str | None = None
+    actionType: ActionType  # "approve" | "reject" | "revert" | "custom"
+    actionCode: str | None = None
+    transitionLabel: str = ""
+    description: str = ""
+    conditionExpression: str | None = None
+    priority: int = 0
+```
+
+## Basic Transition
+
+A simple transition from one step to another:
+
+```json
+{
+  "fromStepCode": "start_request",
+  "toStepCode": "manager_approval",
+  "actionType": "approve",
+  "actionCode": null,
+  "transitionLabel": "submit",
+  "description": "Start the approval path.",
+  "conditionExpression": null,
+  "priority": 0
+}
+```
+
+### Field Descriptions
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `fromStepCode` | `string` | Yes | Source step code (must exist) |
+| `toStepCode` | `string \| null` | No | Target step code (null = terminal) |
+| `actionType` | `ActionType` | Yes | Action triggering this transition |
+| `actionCode` | `string \| null` | Conditional | Required if `actionType: "custom"` |
+| `transitionLabel` | `string` | No | Display label for the transition |
+| `description` | `string` | No | Human-readable description |
+| `conditionExpression` | `string \| null` | No | JSONPath or expression for conditional routing |
+| `priority` | `int` | No | Evaluation order (lower = higher priority) |
+
+## Action Types
+
+```python
+# From workflow_schemas.py:9
+ActionType = Literal["approve", "reject", "revert", "custom"]
+```
+
+### Approve
+
+**Purpose**: Move the workflow forward (happy path).
+
+```json
+{
+  "fromStepCode": "manager_review",
+  "toStepCode": "director_review",
+  "actionType": "approve",
+  "transitionLabel": "approve",
+  "description": "Manager approves, escalate to director."
+}
+```
+
+This is the most common action type for forward progress.
+
+### Reject
+
+**Purpose**: Terminate or route to a rejection path.
+
+```json
+{
+  "fromStepCode": "manager_review",
+  "toStepCode": "rejected",
+  "actionType": "reject",
+  "transitionLabel": "reject",
+  "description": "Manager rejects the request."
+}
+```
+
+<Note>
+  Reject actions often target terminal steps, but they can also route to intermediate steps for further processing.
+</Note>
+
+### Revert
+
+**Purpose**: Send the workflow back to a previous step.
+
+```json
+{
+  "fromStepCode": "director_review",
+  "toStepCode": "manager_review",
+  "actionType": "revert",
+  "transitionLabel": "send back",
+  "description": "Director sends back to manager for revision."
+}
+```
+
+<Warning>
+  The target step must have `allowRevert: true` for revert transitions to work. Otherwise, the workflow engine may reject the action at runtime.
+</Warning>
+
+### Custom
+
+**Purpose**: Define a custom action code for application-specific logic.
+
+```json
+{
+  "fromStepCode": "payment_step",
+  "toStepCode": "verification_step",
+  "actionType": "custom",
+  "actionCode": "mark_as_paid",
+  "transitionLabel": "confirm payment",
+  "description": "Custom action to mark the request as paid."
+}
+```
+
+<Warning>
+  **Validation Rule**: If `actionType: "custom"`, you **must** provide an `actionCode` value. The API will reject transitions without it (workflows.py:101-104).
+</Warning>
+
+## Terminal Transitions
+
+Set `toStepCode: null` to end the workflow immediately:
+
+```json
+{
+  "fromStepCode": "manager_review",
+  "toStepCode": null,
+  "actionType": "reject",
+  "transitionLabel": "reject outright",
+  "description": "End the workflow immediately without further steps."
+}
+```
+
+This creates a transition that terminates the workflow without routing to another step.
+
+## Conditional Routing
+
+Use `conditionExpression` to route based on workflow context:
+
+```json
+[
+  {
+    "fromStepCode": "check_amount",
+    "toStepCode": "auto_approve",
+    "actionType": "approve",
+    "conditionExpression": "$.amount < 1000",
+    "transitionLabel": "auto-approve small amounts",
+    "priority": 1
+  },
+  {
+    "fromStepCode": "check_amount",
+    "toStepCode": "manager_review",
+    "actionType": "approve",
+    "conditionExpression": "$.amount >= 1000",
+    "transitionLabel": "require manager review",
+    "priority": 2
+  }
+]
+```
+
+### Condition Expression Syntax
+
+The platform supports **JSONPath** expressions to query the workflow instance context:
+
+| Expression | Description |
+|------------|-------------|
+| `$.amount < 1000` | Amount field is less than 1000 |
+| `$.department == "finance"` | Department equals "finance" |
+| `$.status in ["pending", "draft"]` | Status is pending or draft |
+| `$.requester.role == "manager"` | Nested field check |
+
+<Note>
+  The exact expression syntax depends on the workflow engine implementation. Check your engine's documentation for supported operators.
+</Note>
+
+### Fallback Transition
+
+If **no** conditional transitions match, the workflow engine looks for an **unconditional** transition:
+
+```json
+{
+  "fromStepCode": "check_amount",
+  "toStepCode": "manual_review",
+  "actionType": "approve",
+  "conditionExpression": null,
+  "transitionLabel": "fallback to manual review",
+  "priority": 999
+}
+```
+
+This acts as a "catch-all" if no specific conditions match.
+
+## Priority
+
+The `priority` field determines the evaluation order when multiple transitions exist from the same step:
+
+```json
+[
+  {
+    "fromStepCode": "review",
+    "toStepCode": "approved",
+    "actionType": "approve",
+    "conditionExpression": "$.score > 90",
+    "priority": 1
+  },
+  {
+    "fromStepCode": "review",
+    "toStepCode": "manual_check",
+    "actionType": "approve",
+    "conditionExpression": "$.score > 70",
+    "priority": 2
+  },
+  {
+    "fromStepCode": "review",
+    "toStepCode": "rejected",
+    "actionType": "approve",
+    "conditionExpression": null,
+    "priority": 3
+  }
+]
+```
+
+The workflow engine evaluates transitions in ascending `priority` order:
+1. Check `$.score > 90` (priority 1)
+2. Check `$.score > 70` (priority 2)
+3. Fallback to unconditional (priority 3)
+
+<Note>
+  Lower priority values are evaluated first. Priority 0 is the highest priority.
+</Note>
+
+## Validation Rules
+
+### 1. Source Step Must Exist
+
+```python
+# From workflows.py:93-95
+if transition.fromStepCode not in steps_by_code:
+    errors.append(f"Transition source step '{transition.fromStepCode}' does not exist.")
+```
+
+### 2. Target Step Must Exist (if specified)
+
+```python
+# From workflows.py:97-99
+if transition.toStepCode and transition.toStepCode not in steps_by_code:
+    errors.append(f"Transition target step '{transition.toStepCode}' does not exist.")
+```
+
+### 3. Custom Actions Require actionCode
+
+```python
+# From workflows.py:101-104
+if transition.actionType == "custom" and not transition.actionCode:
+    errors.append(
+        f"Transition '{transition.fromStepCode}' -> '{transition.toStepCode}' requires an actionCode."
+    )
+```
+
+### 4. No Unconditional Self-Loops
+
+```python
+# From workflows.py:106-112
+if (
+    transition.toStepCode == transition.fromStepCode
+    and transition.conditionExpression is None
+):
+    errors.append(
+        f"Unconditional self-loop detected on step '{transition.fromStepCode}'."
+    )
+```
+
+<Warning>
+  Self-loops are allowed **only** if they have a `conditionExpression`. Otherwise, they create infinite loops.
+</Warning>
+
+### 5. One Unconditional Transition Per Action
+
+```python
+# From workflows.py:114-120
+if transition.conditionExpression is None:
+    signature = (transition.fromStepCode, transition.actionType)
+    if signature in seen_unconditional:
+        errors.append(
+            "Only one unconditional transition is allowed per source step and action type."
+        )
+    seen_unconditional.add(signature)
+```
+
+This prevents ambiguity when multiple transitions share the same `fromStepCode` and `actionType`.
+
+### 6. Non-Terminal Steps Must Have Outgoing Transitions
+
+```python
+# From workflows.py:127-130
+if step.stepType == "end" or step.isTerminal:
+    continue
+if not outgoing.get(step.stepCode):
+    errors.append(f"Step '{step.stepCode}' must have at least one outgoing transition.")
+```
+
+Every step (except terminal steps) must have at least one transition leading out of it.
+
+## Builder UI
+
+The builder provides a grid-based UI for managing transitions (workflow-builder.tsx:1664-1748):
+
+```tsx
+<Card className="border-border/70">
+  <CardHeader className="flex flex-row items-center justify-between gap-4">
+    <div className="space-y-1">
+      <CardTitle>Transitions section</CardTitle>
+      <CardDescription>
+        Define source, target, label, action type, and optional conditions for each edge.
+      </CardDescription>
+    </div>
+    <Button onClick={addTransition} variant="outline">
+      Add transition
+    </Button>
+  </CardHeader>
+  <CardContent className="space-y-3">
+    {transitions.map((transition, transitionIndex) => (
+      <div className="grid gap-3 rounded-2xl border border-border/70 p-4 md:grid-cols-2 xl:grid-cols-7">
+        {/* From step dropdown */}
+        <select onChange={(e) => updateTransition(transitionIndex, { fromStepCode: e.target.value })}>
+          {steps.map((step) => (
+            <option value={step.stepCode}>{step.stepCode}</option>
+          ))}
+        </select>
+        
+        {/* To step dropdown */}
+        <select onChange={(e) => updateTransition(transitionIndex, { toStepCode: e.target.value })}>
+          <option value="">terminal / none</option>
+          {steps.map((step) => (
+            <option value={step.stepCode}>{step.stepCode}</option>
+          ))}
+        </select>
+        
+        {/* Action type dropdown */}
+        <select onChange={(e) => updateTransition(transitionIndex, { actionType: e.target.value })}>
+          <option value="approve">approve</option>
+          <option value="reject">reject</option>
+          <option value="revert">revert</option>
+          <option value="custom">custom</option>
+        </select>
+        
+        {/* Transition label, description, condition inputs */}
+        <Input placeholder="Transition label" />
+        <Input placeholder="Description" />
+        <Input placeholder="Condition" />
+        
+        <Button onClick={() => removeTransition(transitionIndex)} variant="ghost">
+          Remove
+        </Button>
+      </div>
+    ))}
+  </CardContent>
+</Card>
+```
+
+## Graph Representation
+
+Transitions are converted to React Flow edges for the visual preview:
+
+```typescript
+// From workflow-builder.tsx:412-432
+function createEdges(transitions: BuilderTransition[]): Edge[] {
+  return transitions
+    .filter((transition) => transition.fromStepCode && transition.toStepCode)
+    .map((transition) => ({
+      id: `${transition.fromStepCode}-${transition.actionType}-${transition.toStepCode}`,
+      source: transition.fromStepCode,
+      target: transition.toStepCode,
+      label: transition.transitionLabel,
+      markerEnd: { type: MarkerType.ArrowClosed },
+      animated: transition.actionType === "approve",  // Approve edges are animated
+      style: { strokeWidth: 1.5 },
+      labelStyle: {
+        fill: "var(--foreground)",
+        fontSize: 12,
+        fontWeight: 600,
+      },
+      labelBgStyle: {
+        fill: "var(--background)",
+      },
+    }))
+}
+```
+
+<Note>
+  Terminal transitions (`toStepCode: null`) are filtered out of the graph preview since they have no target node.
+</Note>
+
+## Database Persistence
+
+Transitions are persisted to `workflow_transition_definition` (workflows.py:653-680):
+
+```sql
+INSERT INTO workflow_transition_definition (
+    workflow_version_id,
+    from_step_definition_id,
+    to_step_definition_id,
+    action_type,
+    action_code,
+    transition_label,
+    description,
+    condition_expression,
+    priority
+)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+```
+
+The API converts `stepCode` to `step_definition_id` using the `step_id_by_code` mapping (workflows.py:671-672).
+
+## Common Patterns
+
+<AccordionGroup>
+  <Accordion title="Simple Linear Flow">
+    ```json
+    [
+      { "fromStepCode": "start", "toStepCode": "step1", "actionType": "approve" },
+      { "fromStepCode": "step1", "toStepCode": "step2", "actionType": "approve" },
+      { "fromStepCode": "step2", "toStepCode": "end", "actionType": "approve" }
+    ]
+    ```
+  </Accordion>
+  
+  <Accordion title="Approval with Rejection">
+    ```json
+    [
+      { "fromStepCode": "review", "toStepCode": "approved", "actionType": "approve" },
+      { "fromStepCode": "review", "toStepCode": "rejected", "actionType": "reject" }
+    ]
+    ```
+  </Accordion>
+  
+  <Accordion title="Conditional Routing">
+    ```json
+    [
+      {
+        "fromStepCode": "decision",
+        "toStepCode": "auto_approve",
+        "actionType": "approve",
+        "conditionExpression": "$.amount < 1000"
+      },
+      {
+        "fromStepCode": "decision",
+        "toStepCode": "manual_review",
+        "actionType": "approve",
+        "conditionExpression": "$.amount >= 1000"
+      }
+    ]
+    ```
+  </Accordion>
+  
+  <Accordion title="Revert Loop with Guard">
+    ```json
+    [
+      { "fromStepCode": "review", "toStepCode": "revision", "actionType": "revert" },
+      { "fromStepCode": "revision", "toStepCode": "review", "actionType": "approve" }
+    ]
+    ```
+    
+    **Important**: The `review` or `revision` step must have `maxVisitsPerInstance` set to prevent infinite loops.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Visual Editor" icon="bezier-curve" href="/builder/visual-editor">
+    Learn about the React Flow graph preview
+  </Card>
+  <Card title="Validation" icon="check" href="/builder/validation">
+    Understand transition validation rules and errors
+  </Card>
+</CardGroup>

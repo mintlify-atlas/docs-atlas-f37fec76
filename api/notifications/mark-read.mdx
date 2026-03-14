@@ -1,0 +1,266 @@
+---
+title: Mark Notification as Read
+api: POST /api/v1/notifications/{notification_id}/read
+---
+
+Marks a notification as read for the authenticated user. This endpoint is idempotent - marking an already-read notification as read has no effect.
+
+## Authentication
+
+Requires Bearer token authentication. The notification must belong to the authenticated user.
+
+## Path Parameters
+
+<ParamField path="notification_id" type="UUID" required>
+  The unique identifier of the notification to mark as read.
+</ParamField>
+
+## Response
+
+<ResponseField name="id" type="UUID">
+  Unique identifier for the notification.
+</ResponseField>
+
+<ResponseField name="workflowInstanceId" type="UUID | null">
+  The workflow instance this notification is associated with (if applicable).
+</ResponseField>
+
+<ResponseField name="stepInstanceId" type="UUID | null">
+  The step instance this notification is associated with (if applicable).
+</ResponseField>
+
+<ResponseField name="notificationType" type="string">
+  Type of notification (e.g., `task_assigned`, `workflow_completed`, `reminder`).
+</ResponseField>
+
+<ResponseField name="title" type="string">
+  Notification title.
+</ResponseField>
+
+<ResponseField name="body" type="string">
+  Notification message body.
+</ResponseField>
+
+<ResponseField name="isRead" type="boolean">
+  Will be `true` after marking as read.
+</ResponseField>
+
+<ResponseField name="readAt" type="string | null">
+  ISO 8601 timestamp when the notification was marked as read.
+</ResponseField>
+
+<ResponseField name="createdAt" type="string">
+  ISO 8601 timestamp when the notification was created.
+</ResponseField>
+
+## Example Request
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://api.example.com/api/v1/notifications/a1b2c3d4-e5f6-7890-abcd-ef1234567890/read \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+```javascript JavaScript
+const response = await fetch(
+  'https://api.example.com/api/v1/notifications/a1b2c3d4-e5f6-7890-abcd-ef1234567890/read',
+  {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer YOUR_TOKEN'
+    }
+  }
+);
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.post(
+    'https://api.example.com/api/v1/notifications/a1b2c3d4-e5f6-7890-abcd-ef1234567890/read',
+    headers={'Authorization': 'Bearer YOUR_TOKEN'}
+)
+
+data = response.json()
+```
+
+</CodeGroup>
+
+## Example Response
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "workflowInstanceId": "123e4567-e89b-12d3-a456-426614174000",
+  "stepInstanceId": "456e7890-e12b-12d3-a456-426614174222",
+  "notificationType": "task_assigned",
+  "title": "Action required: Manager Review",
+  "body": "The workflow 'Expense Approval' is waiting for your action.",
+  "isRead": true,
+  "readAt": "2024-03-14T10:45:32Z",
+  "createdAt": "2024-03-14T10:30:01Z"
+}
+```
+
+## Status Codes
+
+<ResponseField name="200" type="OK">
+  Notification marked as read successfully.
+</ResponseField>
+
+<ResponseField name="401" type="Unauthorized">
+  Missing or invalid authentication token.
+</ResponseField>
+
+<ResponseField name="404" type="Not Found">
+  Notification not found or does not belong to the authenticated user.
+</ResponseField>
+
+## Behavior
+
+### Idempotency
+
+This endpoint is idempotent. Calling it multiple times on the same notification will:
+- Always return 200 OK
+- Keep the original `readAt` timestamp from the first call
+- Not trigger duplicate real-time events
+
+### Real-time Updates
+
+When a notification is marked as read:
+1. The notification's `isRead` flag is set to `true`
+2. The `readAt` timestamp is recorded
+3. A real-time event is published to subscribers via [Server-Sent Events](/api/realtime/sse)
+
+Subscribers listening to the `notifications` channel will receive an event:
+
+```json
+{
+  "id": "evt-123",
+  "type": "runtime.notifications.changed",
+  "channels": ["notifications"],
+  "users": ["user-123"],
+  "workflowInstanceId": "123e4567-e89b-12d3-a456-426614174000",
+  "notificationId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "occurredAt": "2024-03-14T10:45:32Z"
+}
+```
+
+## Use Cases
+
+### Mark Single Notification as Read on Click
+
+Mark a notification as read when user clicks it:
+
+```javascript
+async function handleNotificationClick(notificationId) {
+  // Mark as read
+  await fetch(
+    `https://api.example.com/api/v1/notifications/${notificationId}/read`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    }
+  );
+  
+  // Update UI
+  updateNotificationUI(notificationId);
+}
+```
+
+### Mark All as Read
+
+Mark all unread notifications as read:
+
+```javascript
+async function markAllAsRead(notifications) {
+  const unread = notifications.filter(n => !n.isRead);
+  
+  await Promise.all(
+    unread.map(notification =>
+      fetch(
+        `https://api.example.com/api/v1/notifications/${notification.id}/read`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        }
+      )
+    )
+  );
+  
+  // Refresh notification list
+  await fetchNotifications();
+}
+```
+
+### Auto-mark as Read on View
+
+Automatically mark notifications as read when they appear in viewport:
+
+```javascript
+const observer = new IntersectionObserver(
+  async (entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) {
+        const notificationId = entry.target.dataset.notificationId;
+        const isRead = entry.target.dataset.isRead === 'true';
+        
+        if (!isRead) {
+          await fetch(
+            `https://api.example.com/api/v1/notifications/${notificationId}/read`,
+            {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${token}`
+              }
+            }
+          );
+          
+          entry.target.dataset.isRead = 'true';
+          observer.unobserve(entry.target);
+        }
+      }
+    }
+  },
+  { threshold: 0.5 }
+);
+
+// Observe notification elements
+document.querySelectorAll('.notification').forEach(el => {
+  observer.observe(el);
+});
+```
+
+### Track Read Rate Analytics
+
+Track notification engagement:
+
+```javascript
+async function markAsReadWithAnalytics(notificationId, notificationType) {
+  const startTime = Date.now();
+  
+  await fetch(
+    `https://api.example.com/api/v1/notifications/${notificationId}/read`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    }
+  );
+  
+  // Track analytics
+  analytics.track('notification_read', {
+    notificationId,
+    notificationType,
+    timeToRead: Date.now() - startTime
+  });
+}
+```

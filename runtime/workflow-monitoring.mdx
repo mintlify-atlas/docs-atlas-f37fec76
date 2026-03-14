@@ -1,0 +1,608 @@
+---
+title: Workflow Monitoring
+description: List and inspect running workflow instances with step visits and action history
+---
+
+## Overview
+
+Workflow instances represent active executions of workflow definitions. The monitoring endpoints allow you to list all instances, view detailed execution state, and track step progression.
+
+## Listing Instances
+
+### GET /api/v1/workflow-instances
+
+Retrieve all workflow instances visible to the authenticated user.
+
+**Response (200 OK):**
+
+```json
+{
+  "items": [
+    {
+      "id": "workflow-instance-uuid-1",
+      "workflowDefinitionId": "definition-uuid",
+      "workflowDefinitionKey": "invoice-approval",
+      "workflowDefinitionName": "Invoice Approval",
+      "workflowVersionId": "version-uuid",
+      "businessKey": "invoice-2026-001",
+      "runNumber": 1,
+      "status": "waiting",
+      "currentStepCode": "manager-review",
+      "currentStepLabel": "Manager Review",
+      "startedBy": "user-id-123",
+      "startedAt": "2026-03-14T10:30:00Z",
+      "completedAt": null
+    },
+    {
+      "id": "workflow-instance-uuid-2",
+      "workflowDefinitionId": "definition-uuid",
+      "workflowDefinitionKey": "invoice-approval",
+      "workflowDefinitionName": "Invoice Approval",
+      "workflowVersionId": "version-uuid",
+      "businessKey": "invoice-2026-002",
+      "runNumber": 1,
+      "status": "completed",
+      "currentStepCode": "end",
+      "currentStepLabel": "End",
+      "startedBy": "user-id-456",
+      "startedAt": "2026-03-14T09:00:00Z",
+      "completedAt": "2026-03-14T09:45:00Z"
+    }
+  ]
+}
+```
+
+<CodeGroup>
+```python API Implementation
+# From runtime.py:1193-1237
+@router.get("/api/v1/workflow-instances", response_model=WorkflowInstanceListResponse)
+def list_workflow_instances(
+    _: AuthenticatedUser = Depends(get_current_user),
+) -> WorkflowInstanceListResponse:
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    wi.*,
+                    wd.id AS workflow_definition_id,
+                    wd.key AS workflow_definition_key,
+                    wd.name AS workflow_definition_name,
+                    sd.step_code AS current_step_code,
+                    sd.step_label AS current_step_label
+                FROM workflow_instance wi
+                JOIN workflow_definition_version wdv ON wdv.id = wi.workflow_version_id
+                JOIN workflow_definition wd ON wd.id = wdv.workflow_definition_id
+                LEFT JOIN step_instance si ON si.id = wi.current_step_instance_id
+                LEFT JOIN workflow_step_definition sd ON sd.id = si.step_definition_id
+                ORDER BY wi.started_at DESC
+                """
+            )
+            rows = cursor.fetchall()
+
+    return WorkflowInstanceListResponse(
+        items=[
+            WorkflowInstanceSummary(
+                id=row["id"],
+                workflowDefinitionId=row["workflow_definition_id"],
+                workflowDefinitionKey=row["workflow_definition_key"],
+                workflowDefinitionName=row["workflow_definition_name"],
+                workflowVersionId=row["workflow_version_id"],
+                businessKey=row["business_key"],
+                runNumber=row["run_number"],
+                status=row["status"],
+                currentStepCode=row["current_step_code"],
+                currentStepLabel=row["current_step_label"],
+                startedBy=row["started_by"],
+                startedAt=_to_iso(row["started_at"]),
+                completedAt=_to_iso(row["completed_at"]),
+            )
+            for row in rows
+        ]
+    )
+```
+
+```typescript Frontend Loading
+// From runtime-console.tsx:251-258
+const loadInstances = useCallback(async () => {
+  const response = await authedFetch("/api/v1/workflow-instances", { method: "GET" })
+  const payload = (await response.json()) as { items: WorkflowInstanceSummary[] }
+  if (!response.ok) {
+    throw new Error("Unable to load workflow instances.")
+  }
+  setInstances(payload.items)
+}, [authedFetch])
+```
+</CodeGroup>
+
+## Instance Details
+
+### GET /api/v1/workflow-instances/:workflow_instance_id
+
+Retrieve full details for a specific workflow instance, including step visits, action history, graph data, and context.
+
+**Response (200 OK):**
+
+```json
+{
+  "item": {
+    "id": "workflow-instance-uuid",
+    "workflowDefinitionId": "definition-uuid",
+    "workflowDefinitionKey": "invoice-approval",
+    "workflowDefinitionName": "Invoice Approval",
+    "workflowVersionId": "version-uuid",
+    "businessKey": "invoice-2026-001",
+    "runNumber": 1,
+    "status": "waiting",
+    "currentStepCode": "cfo-approval",
+    "currentStepLabel": "CFO Approval",
+    "startedBy": "user-id-123",
+    "startedAt": "2026-03-14T10:30:00Z",
+    "completedAt": null,
+    "inputData": {
+      "amount": 15000,
+      "vendor": "Acme Corp"
+    },
+    "contextData": {
+      "amount": 15000,
+      "vendor": "Acme Corp",
+      "department": "finance",
+      "managerApproval": true,
+      "managerComment": "Budget approved"
+    },
+    "outputData": {},
+    "graphJson": {
+      "steps": [
+        { "stepCode": "start", "stepLabel": "Start" },
+        { "stepCode": "manager-review", "stepLabel": "Manager Review" },
+        { "stepCode": "cfo-approval", "stepLabel": "CFO Approval" },
+        { "stepCode": "end", "stepLabel": "End" }
+      ],
+      "transitions": [
+        { "fromStepCode": "start", "toStepCode": "manager-review", "actionType": "approve" },
+        { "fromStepCode": "manager-review", "toStepCode": "cfo-approval", "actionType": "approve" },
+        { "fromStepCode": "manager-review", "toStepCode": "end", "actionType": "reject" },
+        { "fromStepCode": "cfo-approval", "toStepCode": "end", "actionType": "approve" }
+      ]
+    },
+    "builderLayout": {
+      "nodes": [
+        { "id": "start", "type": "start", "position": { "x": 100, "y": 100 } },
+        { "id": "manager-review", "type": "humanTask", "position": { "x": 300, "y": 100 } }
+      ],
+      "edges": [
+        { "id": "e1", "source": "start", "target": "manager-review" }
+      ]
+    },
+    "steps": [
+      {
+        "id": "step-instance-1",
+        "stepCode": "start",
+        "stepLabel": "Start",
+        "stepType": "start",
+        "status": "completed",
+        "visitCount": 1,
+        "enteredAt": "2026-03-14T10:30:00Z",
+        "completedAt": "2026-03-14T10:30:01Z",
+        "waitingSince": null,
+        "resultAction": "approve"
+      },
+      {
+        "id": "step-instance-2",
+        "stepCode": "manager-review",
+        "stepLabel": "Manager Review",
+        "stepType": "human_task",
+        "status": "completed",
+        "visitCount": 1,
+        "enteredAt": "2026-03-14T10:30:01Z",
+        "completedAt": "2026-03-14T10:35:00Z",
+        "waitingSince": "2026-03-14T10:30:01Z",
+        "resultAction": "approve"
+      },
+      {
+        "id": "step-instance-3",
+        "stepCode": "cfo-approval",
+        "stepLabel": "CFO Approval",
+        "stepType": "human_task",
+        "status": "waiting",
+        "visitCount": 1,
+        "enteredAt": "2026-03-14T10:35:00Z",
+        "completedAt": null,
+        "waitingSince": "2026-03-14T10:35:00Z",
+        "resultAction": null
+      }
+    ],
+    "actions": [
+      {
+        "id": "action-1",
+        "actionType": "start",
+        "actionCode": null,
+        "actorUserId": "user-id-123",
+        "actorType": "user",
+        "remarkText": null,
+        "payload": {
+          "workflowDefinitionKey": "invoice-approval",
+          "businessKey": "invoice-2026-001"
+        },
+        "createdAt": "2026-03-14T10:30:00Z"
+      },
+      {
+        "id": "action-2",
+        "actionType": "approve",
+        "actionCode": null,
+        "actorUserId": "manager-user-id",
+        "actorType": "user",
+        "remarkText": "Budget approved by finance team",
+        "payload": {
+          "source": "runtime-console"
+        },
+        "createdAt": "2026-03-14T10:35:00Z"
+      }
+    ]
+  }
+}
+```
+
+<CodeGroup>
+```python Loading Instance Detail
+# From runtime.py:1017-1075
+def _load_instance_detail(workflow_instance_id) -> WorkflowInstanceDetail:
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    wi.*,
+                    wd.id AS workflow_definition_id,
+                    wd.key AS workflow_definition_key,
+                    wd.name AS workflow_definition_name,
+                    wdv.graph_json,
+                    wdv.builder_layout,
+                    sd.step_code AS current_step_code,
+                    sd.step_label AS current_step_label,
+                    wid.input_data,
+                    wid.context_data,
+                    wid.output_data
+                FROM workflow_instance wi
+                JOIN workflow_definition_version wdv ON wdv.id = wi.workflow_version_id
+                JOIN workflow_definition wd ON wd.id = wdv.workflow_definition_id
+                LEFT JOIN step_instance si ON si.id = wi.current_step_instance_id
+                LEFT JOIN workflow_step_definition sd ON sd.id = si.step_definition_id
+                LEFT JOIN workflow_instance_data wid ON wid.workflow_instance_id = wi.id
+                WHERE wi.id = %s
+                """,
+                (workflow_instance_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Workflow instance not found.",
+                )
+
+            steps = _load_step_instances(cursor, workflow_instance_id)
+            actions = _load_actions(cursor, workflow_instance_id)
+
+    return WorkflowInstanceDetail(
+        id=row["id"],
+        workflowDefinitionId=row["workflow_definition_id"],
+        workflowDefinitionKey=row["workflow_definition_key"],
+        workflowDefinitionName=row["workflow_definition_name"],
+        workflowVersionId=row["workflow_version_id"],
+        businessKey=row["business_key"],
+        runNumber=row["run_number"],
+        status=row["status"],
+        currentStepCode=row["current_step_code"],
+        currentStepLabel=row["current_step_label"],
+        startedBy=row["started_by"],
+        startedAt=_to_iso(row["started_at"]),
+        completedAt=_to_iso(row["completed_at"]),
+        inputData=_json(row["input_data"]),
+        contextData=_json(row["context_data"]),
+        outputData=_json(row["output_data"]),
+        graphJson=_json(row["graph_json"]),
+        builderLayout=_json(row["builder_layout"]),
+        steps=steps,
+        actions=actions,
+    )
+```
+
+```typescript Frontend Detail Loading
+// From runtime-console.tsx:332-359
+async function loadInstanceDetail(instanceId: string, options?: { silent?: boolean }) {
+  if (!options?.silent) {
+    setIsBusy(true)
+    setError(null)
+  }
+
+  try {
+    const response = await authedFetch(`/api/v1/workflow-instances/${instanceId}`, {
+      method: "GET",
+    })
+    const payload = (await response.json()) as { item?: WorkflowInstanceDetail; detail?: string }
+    if (!response.ok || !payload.item) {
+      throw new Error(payload.detail ?? "Unable to load workflow instance detail.")
+    }
+    setSelectedInstance(payload.item)
+    if (!options?.silent) {
+      setStatus(`Loaded workflow instance ${instanceId}.`)
+    }
+  } catch (loadError) {
+    if (!options?.silent) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load workflow instance.")
+    }
+  } finally {
+    if (!options?.silent) {
+      setIsBusy(false)
+    }
+  }
+}
+```
+</CodeGroup>
+
+## Step Instance Fields
+
+Each step visit includes:
+
+<ResponseField name="id" type="UUID">
+  Unique identifier for this step instance
+</ResponseField>
+
+<ResponseField name="stepCode" type="string">
+  The step's code from the workflow definition
+</ResponseField>
+
+<ResponseField name="stepLabel" type="string">
+  Human-readable label for the step
+</ResponseField>
+
+<ResponseField name="stepType" type="string">
+  Step type: `"start"`, `"human_task"`, `"subworkflow"`, `"end"`, or other automatic types
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Step status: `"pending"`, `"active"`, `"waiting"`, `"completed"`, `"rejected"`, `"reverted"`, `"failed"`, `"cancelled"`
+</ResponseField>
+
+<ResponseField name="visitCount" type="number">
+  How many times this step has been visited in this workflow instance (for loops)
+</ResponseField>
+
+<ResponseField name="enteredAt" type="ISO8601">
+  Timestamp when the step instance was created
+</ResponseField>
+
+<ResponseField name="completedAt" type="ISO8601 | null">
+  Timestamp when the step completed, or `null` if still active
+</ResponseField>
+
+<ResponseField name="waitingSince" type="ISO8601 | null">
+  Timestamp when the step entered waiting state (for human tasks or subworkflows)
+</ResponseField>
+
+<ResponseField name="resultAction" type="string | null">
+  The action that completed this step: `"approve"`, `"reject"`, `"revert"`, `"custom"`, or `null`
+</ResponseField>
+
+## Workflow Action Fields
+
+Each action record includes:
+
+<ResponseField name="id" type="UUID">
+  Unique identifier for this action
+</ResponseField>
+
+<ResponseField name="actionType" type="string">
+  Action type: `"start"`, `"approve"`, `"reject"`, `"revert"`, `"custom"`
+</ResponseField>
+
+<ResponseField name="actionCode" type="string | null">
+  Custom action code for transitions with multiple custom paths
+</ResponseField>
+
+<ResponseField name="actorUserId" type="string | null">
+  UUID of the user who performed the action
+</ResponseField>
+
+<ResponseField name="actorType" type="string">
+  Actor type: `"user"`, `"system"`, `"integration"`
+</ResponseField>
+
+<ResponseField name="remarkText" type="string | null">
+  User-provided comment explaining the action
+</ResponseField>
+
+<ResponseField name="payload" type="object">
+  Additional structured data attached to the action
+</ResponseField>
+
+<ResponseField name="createdAt" type="ISO8601">
+  Timestamp when the action was recorded
+</ResponseField>
+
+## Context Data Flow
+
+The instance detail exposes three data objects:
+
+### inputData
+
+The original input provided when the workflow was started. This never changes.
+
+### contextData
+
+The working context that flows through the workflow. Step output mappings update this as the workflow progresses:
+
+```python
+# From runtime.py:624-633
+def _apply_output_mapping(output_mapping: dict[str, Any], payload: dict[str, Any], current_context: dict[str, Any]):
+    updated = dict(current_context)
+    for destination, source_path in (output_mapping or {}).items():
+        value = (
+            _resolve_mapping_value(source_path, payload)
+            if isinstance(source_path, str)
+            else source_path
+        )
+        updated[destination] = value
+    return updated
+```
+
+For example, if a manager approval step has an output mapping:
+
+```json
+{
+  "managerApproval": "$.approved",
+  "managerComment": "$.comment"
+}
+```
+
+And the user submits:
+
+```json
+{
+  "approved": true,
+  "comment": "Budget approved"
+}
+```
+
+The `contextData` is updated to include:
+
+```json
+{
+  "managerApproval": true,
+  "managerComment": "Budget approved"
+}
+```
+
+### outputData
+
+The final output data, copied from `contextData` when the workflow completes:
+
+```python
+# From runtime.py:550-554
+cursor.execute(
+    """
+    UPDATE workflow_instance_data
+    SET output_data = context_data, updated_at = now()
+    WHERE workflow_instance_id = %s
+    """,
+    (workflow_instance["id"],),
+)
+```
+
+## UI Visualization
+
+The Operations page renders instance details with:
+
+1. **Workflow Graph:** Visual representation using `builderLayout` nodes and edges
+2. **Step Visits Table:** List of all step instances with status and timestamps
+3. **Action History Table:** Chronological list of all actions with actors and remarks
+
+```typescript
+// From runtime-console.tsx:838-936
+<TabsContent value="detail">
+  <Card className="border-border/70">
+    <CardHeader>
+      <CardTitle>Selected instance detail</CardTitle>
+      <CardDescription>
+        Steps and workflow actions are shown in table-first format for quick debugging.
+      </CardDescription>
+    </CardHeader>
+    <CardContent className="space-y-6">
+      {selectedInstance ? (
+        <>
+          <WorkflowInstanceGraph
+            builderLayout={selectedInstance.builderLayout}
+            currentStepCode={selectedInstance.currentStepCode}
+            graphJson={selectedInstance.graphJson}
+            steps={selectedInstance.steps}
+          />
+
+          <div className="grid gap-4 md:grid-cols-4">
+            <div className="rounded-xl border border-border/70 bg-muted/20 p-4">
+              <p className="text-sm text-muted-foreground">Workflow</p>
+              <p className="font-medium">{selectedInstance.workflowDefinitionName}</p>
+            </div>
+            <div className="rounded-xl border border-border/70 bg-muted/20 p-4">
+              <p className="text-sm text-muted-foreground">Status</p>
+              <p className="font-medium">{selectedInstance.status}</p>
+            </div>
+            <div className="rounded-xl border border-border/70 bg-muted/20 p-4">
+              <p className="text-sm text-muted-foreground">Current step</p>
+              <p className="font-medium">{selectedInstance.currentStepLabel ?? "-"}</p>
+            </div>
+            <div className="rounded-xl border border-border/70 bg-muted/20 p-4">
+              <p className="text-sm text-muted-foreground">Run number</p>
+              <p className="font-medium">{selectedInstance.runNumber}</p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <p className="font-medium">Step visits</p>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Step</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Visit</TableHead>
+                  <TableHead>Entered</TableHead>
+                  <TableHead>Completed</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {selectedInstance.steps.map((step) => (
+                  <TableRow key={step.id}>
+                    <TableCell>
+                      <div>
+                        <p className="font-medium">{step.stepLabel}</p>
+                        <p className="text-xs text-muted-foreground">{step.stepCode}</p>
+                      </div>
+                    </TableCell>
+                    <TableCell>{step.status}</TableCell>
+                    <TableCell>{step.visitCount}</TableCell>
+                    <TableCell>{formatDate(step.enteredAt)}</TableCell>
+                    <TableCell>{formatDate(step.completedAt)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+
+          <div className="space-y-3">
+            <p className="font-medium">Action history</p>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Action</TableHead>
+                  <TableHead>Actor</TableHead>
+                  <TableHead>Remark</TableHead>
+                  <TableHead>Time</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {selectedInstance.actions.map((action) => (
+                  <TableRow key={action.id}>
+                    <TableCell>{action.actionType}</TableCell>
+                    <TableCell>{action.actorUserId ?? action.actorType}</TableCell>
+                    <TableCell>{action.remarkText ?? "-"}</TableCell>
+                    <TableCell>{formatDate(action.createdAt)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          Start or inspect a workflow instance to view step visits and action history.
+        </p>
+      )}
+    </CardContent>
+  </Card>
+</TabsContent>
+```
+
+## Related Endpoints
+
+- [Starting Workflows](/runtime/starting-workflows)
+- [Status History](/runtime/history)
+- [Task Inbox](/runtime/task-inbox)

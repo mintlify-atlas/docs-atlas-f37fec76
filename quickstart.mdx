@@ -1,80 +1,412 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: 'Quickstart'
+description: 'Get the Workflow Engine Platform running locally in minutes'
 ---
 
-## Get started in three steps
+This guide walks you through setting up the complete workflow engine stack from scratch. You'll have a working system with authentication, workflow builder, and runtime console ready for testing.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+Before you begin, ensure you have:
+
+- **Node.js 18+** and **pnpm 10.x** installed
+- **Python 3.12+** with `uv` available on PATH
+- **Docker** and **Docker Compose** for RabbitMQ
+- A **Neon PostgreSQL** database (free tier works fine)
+
+<Note>
+If `uv` is not available, install it with:
+```bash
+python3 -m pip install --user uv
+export PATH="$HOME/.local/bin:$PATH"
+```
+</Note>
+
+## Installation
+
+<Steps>
+
+<Step title="Clone and install dependencies">
+
+Clone the repository and install all dependencies:
+
+```bash
+git clone <repository-url>
+cd workflow-engine-platform
+pnpm install
+```
+
+This installs dependencies for both the web app and sets up the monorepo workspace.
+
+</Step>
+
+<Step title="Configure environment variables">
+
+Copy the example environment files:
+
+```bash
+cp apps/web/.env.example apps/web/.env.local
+cp apps/api/.env.example apps/api/.env
+```
+
+Update both files with your Neon connection string:
+
+<CodeGroup>
+
+```bash apps/web/.env.local
+DATABASE_URL=postgresql://USER:PASSWORD@YOUR_NEON_HOST/neondb?sslmode=require
+BETTER_AUTH_SECRET=replace-with-a-long-random-secret
+BETTER_AUTH_URL=http://localhost:3000
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+```
+
+```bash apps/api/.env
+WORKFLOW_DATABASE_URL=postgresql://USER:PASSWORD@YOUR_NEON_HOST/neondb?sslmode=require
+RABBITMQ_URL=amqp://workflow:workflow@localhost:5672/
+OUTBOX_EXCHANGE=workflow.events
+OUTBOX_BATCH_SIZE=100
+OUTBOX_POLL_INTERVAL_SECONDS=0.5
+OUTBOX_CLAIM_TTL_SECONDS=60
+OUTBOX_MAX_ATTEMPTS_DEFAULT=20
+REALTIME_CHANNEL=workflow_realtime
+REALTIME_DATABASE_URL=
+REALTIME_HEARTBEAT_SECONDS=15
+PRIORITY_RELEASE_BATCH_SIZE=100
+PRIORITY_RELEASE_POLL_INTERVAL_SECONDS=5
+PRIORITY_RELEASE_ADVISORY_LOCK_ID=54001
+WEB_APP_URL=http://localhost:3000
+BETTER_AUTH_ISSUER=http://localhost:3000
+BETTER_AUTH_AUDIENCE=http://localhost:3000
+BETTER_AUTH_JWKS_URL=http://localhost:3000/api/auth/jwks
+```
+
+</CodeGroup>
+
+<Warning>
+Both `DATABASE_URL` and `WORKFLOW_DATABASE_URL` must point to the same Neon database. If your Neon URL is a pooled connection, set `REALTIME_DATABASE_URL` to a direct/session-capable connection string for SSE listeners.
+</Warning>
+
+<Note>
+Generate a secure random secret for `BETTER_AUTH_SECRET`:
+```bash
+openssl rand -base64 32
+```
+</Note>
+
+</Step>
+
+<Step title="Bootstrap the database">
+
+Apply the foundation schema to your Neon database:
+
+```bash
+pnpm bootstrap:db
+```
+
+This creates all necessary tables including:
+- Better Auth tables (`user`, `session`, `account`, `jwks`)
+- Workflow definition tables (static schema)
+- Workflow runtime tables (execution state)
+- Outbox event table (RabbitMQ integration)
+
+The schema is loaded from `infra/postgres/init/01_foundation.sql`.
+
+</Step>
+
+<Step title="Start RabbitMQ">
+
+Launch RabbitMQ using Docker Compose:
+
+```bash
+docker compose -f infra/docker-compose.yml up -d
+```
+
+This starts:
+- **RabbitMQ** on ports 5672 (AMQP) and 15672 (Management UI)
+- Default credentials: `workflow` / `workflow`
+
+Verify RabbitMQ is running:
+```bash
+docker ps
+```
+
+You can access the management UI at http://localhost:15672
+
+</Step>
+
+<Step title="Start the API server">
+
+In a new terminal, start the FastAPI backend:
+
+```bash
+pnpm dev:api
+```
+
+The API will be available at http://localhost:8000
+
+You should see:
+```
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process
+```
+
+Verify the API is working:
+```bash
+curl http://localhost:8000/healthz
+```
+
+</Step>
+
+<Step title="Start the web application">
+
+In another terminal, start the Next.js frontend:
+
+```bash
+pnpm dev:web
+```
+
+The web app will be available at http://localhost:3000
+
+</Step>
+
+<Step title="Seed test users">
+
+Create local test users for multi-user testing:
+
+```bash
+pnpm --dir apps/web seed:users
+```
+
+This creates five test accounts:
+- `admin@example.com`
+- `manager@example.com`
+- `reviewer1@example.com`
+- `reviewer2@example.com`
+- `requester@example.com`
+
+All accounts use the password: `password1234`
+
+<Note>
+These test users are marked with `isTestUser: true` and should only be used in development.
+</Note>
+
+</Step>
+
+<Step title="Start background workers">
+
+Launch the long-running worker containers:
+
+```bash
+pnpm workers:up
+```
+
+This starts two Docker containers:
+- **Outbox Worker** - Publishes database outbox events to RabbitMQ
+- **Priority Worker** - Handles priority chain escalation for human tasks
+
+To stop workers when needed:
+```bash
+pnpm workers:down
+```
+
+</Step>
+
+</Steps>
+
+## Verify Your Setup
+
+1. **Open the web app** at http://localhost:3000
+2. **Sign in** with `admin@example.com` / `password1234`
+3. **Navigate to the Builder** to create your first workflow
+4. **Check the Operations console** to see runtime instances
+
+## Create Your First Workflow
+
+Let's create a simple approval workflow:
+
+<Steps>
+
+<Step title="Define the workflow">
+
+Navigate to the **Builder** page and create a new workflow with:
+
+- **Key**: `expense_approval`
+- **Name**: Expense Approval
+- **Description**: Simple two-step expense approval process
+
+</Step>
+
+<Step title="Add workflow steps">
+
+Add the following steps:
+
+1. **Start** (`start`)
+   - Step Code: `start`
+   - Step Type: `start`
+
+2. **Manager Review** (`human_task`)
+   - Step Code: `manager_review`
+   - Step Type: `human_task`
+   - Assignee: `manager@example.com`
+   - Approval Mode: `priority_chain`
+
+3. **End** (`end`)
+   - Step Code: `approved`
+   - Step Type: `end`
+
+</Step>
+
+<Step title="Add transitions">
+
+Connect the steps with transitions:
+
+- **start → manager_review**: Action `approve`
+- **manager_review → approved**: Action `approve`
+
+</Step>
+
+<Step title="Publish the workflow">
+
+Click **Save & Publish** to make the workflow active.
+
+</Step>
+
+</Steps>
+
+## Start a Workflow Instance
+
+Once your workflow is published:
+
+1. Go to **Operations** → **Instances**
+2. Click **Start New Instance**
+3. Select your `expense_approval` workflow
+4. Provide input data (optional JSON payload)
+5. Click **Start**
+
+The workflow will:
+- Create a new instance
+- Advance to the `manager_review` step
+- Create a human task assigned to `manager@example.com`
+- Send a notification (via the outbox worker)
+
+## Test the Approval Flow
+
+<Steps>
+
+<Step title="View tasks as manager">
+
+Sign in as `manager@example.com` and navigate to **My Tasks**. You should see the pending approval.
+
+</Step>
+
+<Step title="Complete the task">
+
+Click on the task and select **Approve**. Add an optional remark if configured.
+
+</Step>
+
+<Step title="View the completed workflow">
+
+The workflow will advance to the `approved` end state. Check the instance detail page to see the full action history.
+
+</Step>
+
+</Steps>
+
+## Manual Worker Operations
+
+For development and debugging, you can run worker iterations manually:
+
+```bash
+# Publish pending outbox events to RabbitMQ
+pnpm queue:publish
+
+# Release priority-chain tasks that are past their escalation deadline
+pnpm queue:release
+```
+
+## Common Issues
 
 <AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
 
-### Step 2: Deploy your changes
+<Accordion title="uv: command not found">
+Install `uv` using pip:
+```bash
+python3 -m pip install --user uv
+export PATH="$HOME/.local/bin:$PATH"
+```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
+Add the export to your `.bashrc` or `.zshrc` for persistence.
 </Accordion>
 
-## Next steps
+<Accordion title="Database connection refused">
+Verify your Neon connection string is correct and includes `?sslmode=require`. Neon databases require SSL.
 
-Now that you have your docs running, explore these key features:
+Test the connection:
+```bash
+psql "postgresql://USER:PASSWORD@HOST/neondb?sslmode=require"
+```
+</Accordion>
+
+<Accordion title="RabbitMQ connection failed">
+Ensure Docker is running and RabbitMQ container is healthy:
+```bash
+docker ps | grep rabbitmq
+docker logs workflow-engine-rabbitmq
+```
+
+Restart if needed:
+```bash
+docker compose -f infra/docker-compose.yml restart rabbitmq
+```
+</Accordion>
+
+<Accordion title="Better Auth JWT verification fails">
+Ensure both web and API are running on the expected ports:
+- Web: http://localhost:3000
+- API: http://localhost:8000
+
+Check that `BETTER_AUTH_JWKS_URL` in the API `.env` matches the web app URL.
+</Accordion>
+
+</AccordionGroup>
+
+## Available Scripts
+
+All scripts are defined in the root `package.json`:
+
+| Command | Description |
+|---------|-------------|
+| `pnpm bootstrap:db` | Apply database schema to Neon |
+| `pnpm dev:web` | Start Next.js dev server |
+| `pnpm dev:api` | Start FastAPI dev server |
+| `pnpm workers:up` | Start worker containers |
+| `pnpm workers:down` | Stop worker containers |
+| `pnpm queue:publish` | Manual outbox publish iteration |
+| `pnpm queue:release` | Manual priority release iteration |
+| `pnpm build:web` | Build web app for production |
+| `pnpm lint:web` | Lint Next.js code |
+| `pnpm typecheck:web` | Run TypeScript type checking |
+
+## Next Steps
 
 <CardGroup cols={2}>
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
+<Card title="Architecture" icon="sitemap" href="/architecture">
+Understand how the platform is structured and how components interact
 </Card>
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
+<Card title="Workflow Builder" icon="diagram-project" href="/builder">
+Learn how to design complex workflows with branching and subworkflows
 </Card>
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
+<Card title="API Reference" icon="code" href="/api/auth/overview">
+Explore the complete FastAPI endpoint documentation
 </Card>
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
+<Card title="Runtime Operations" icon="gear" href="/runtime/starting-workflows">
+Monitor and manage workflow instances in production
 </Card>
 
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

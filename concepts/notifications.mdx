@@ -1,0 +1,529 @@
+---
+title: Notifications
+description: Understanding the notification system for workflow task assignments and events
+---
+
+## Overview
+
+The notification system alerts users when workflows require their attention. Notifications are created when human tasks are assigned, and can be customized per workflow step.
+
+## Notification Schema
+
+### Database Schema
+
+```sql
+CREATE TABLE notification (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id text NOT NULL REFERENCES "user"(id),
+    workflow_instance_id uuid REFERENCES workflow_instance(id),
+    step_instance_id uuid REFERENCES step_instance(id),
+    notification_type text NOT NULL,
+    title text NOT NULL,
+    body text NOT NULL,
+    is_read boolean NOT NULL DEFAULT false,
+    read_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+### Pydantic Response Model
+
+```python
+class NotificationResponse(BaseModel):
+    id: UUID
+    workflowInstanceId: UUID | None = None
+    stepInstanceId: UUID | None = None
+    notificationType: str
+    title: str
+    body: str
+    isRead: bool
+    readAt: str | None = None
+    createdAt: str
+```
+
+## Notification Types
+
+Current implementation supports:
+
+- **task_assigned**: User assigned to a new human task
+- **task_escalated**: Task escalated to next priority user (future)
+- **reminder**: Reminder for pending task (future)
+- **workflow_completed**: Workflow the user initiated completed (future)
+- **workflow_rejected**: Workflow the user initiated was rejected (future)
+
+<Note>
+The platform is designed to support multiple notification types, but currently only `task_assigned` is actively used.
+</Note>
+
+## Notification Templates
+
+Workflow authors can customize notification messages per step using templates.
+
+### Template Schema
+
+```sql
+CREATE TABLE notification_template (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    workflow_version_id uuid NOT NULL REFERENCES workflow_definition_version(id),
+    step_definition_id uuid REFERENCES workflow_step_definition(id),
+    event_type text NOT NULL,
+    channel text NOT NULL DEFAULT 'in_app',
+    title_template text NOT NULL,
+    body_template text NOT NULL,
+    allow_actor_override boolean NOT NULL DEFAULT true,
+    supported_variables jsonb NOT NULL DEFAULT '[]'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+### Template Model
+
+```python
+class WorkflowNotificationTemplateInput(BaseModel):
+    titleTemplate: str = ""
+    bodyTemplate: str = ""
+    allowActorOverride: bool = True
+```
+
+### Template Variables
+
+Supported variables for message rendering:
+
+- `{workflowName}`: Workflow definition name
+- `{stepLabel}`: Current step label
+- `{stepCode}`: Current step code
+- `{actorEmail}`: Assigned user's email
+
+### Template Example
+
+```json
+{
+  "titleTemplate": "Action Required: {stepLabel}",
+  "bodyTemplate": "The workflow '{workflowName}' has reached {stepLabel} and requires your review. Assigned to: {actorEmail}",
+  "allowActorOverride": true
+}
+```
+
+### Template Rendering
+
+Implemented in `runtime.py:131-145`:
+
+```python
+def _render_notification_template(
+    title_template: str | None,
+    body_template: str | None,
+    context: dict[str, Any],
+    fallback_title: str,
+    fallback_body: str,
+) -> tuple[str, str]:
+    title = title_template or fallback_title
+    body = body_template or fallback_body
+
+    for key, value in context.items():
+        title = title.replace(f"{{{key}}}", str(value))
+        body = body.replace(f"{{{key}}}", str(value))
+
+    return title, body
+```
+
+<Warning>
+Template rendering uses simple string replacement. Variable names are case-sensitive and must match exactly.
+</Warning>
+
+## Notification Creation
+
+Notifications are created when tasks are assigned to users.
+
+### Creation Logic
+
+Implemented in `runtime.py:82-128`:
+
+```python
+def _create_notification(
+    cursor,
+    user_id: str,
+    workflow_instance_id,
+    step_instance_id,
+    notification_type: str,
+    title: str,
+    body: str,
+) -> None:
+    cursor.execute(
+        """INSERT INTO notification (
+            user_id,
+            workflow_instance_id,
+            step_instance_id,
+            notification_type,
+            title,
+            body
+        ) VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id""",
+        (user_id, workflow_instance_id, step_instance_id, notification_type, title, body),
+    )
+    notification_id = cursor.fetchone()["id"]
+    
+    # Record outbox event for async delivery
+    _record_outbox(
+        cursor,
+        "notification",
+        notification_id,
+        "notification.created",
+        {
+            "userId": user_id,
+            "workflowInstanceId": str(workflow_instance_id),
+            "stepInstanceId": str(step_instance_id),
+            "notificationType": notification_type,
+            "title": title,
+            "body": body,
+        },
+    )
+    
+    # Publish realtime event
+    publish_realtime_event(
+        cursor,
+        "runtime.notifications.changed",
+        channels=["notifications"],
+        users=[user_id],
+        workflow_instance_id=str(workflow_instance_id) if workflow_instance_id else None,
+        notification_id=str(notification_id),
+    )
+```
+
+## Task Assignment Notifications
+
+When a human task opens, the assigned user receives a notification.
+
+### Notification Trigger
+
+From `runtime.py:464-494`:
+
+```python
+if task_status == "open" and task_row["assigned_user_id"]:
+    active_user_ids.append(task_row["assigned_user_id"])
+    
+    # Get assignee email
+    cursor.execute(
+        'SELECT email FROM "user" WHERE id = %s',
+        (task_row["assigned_user_id"],)
+    )
+    assignee_row = cursor.fetchone()
+    
+    # Load notification template
+    notification_template = _get_notification_template(
+        cursor,
+        workflow_instance["workflow_version_id"],
+        step_definition["id"],
+        "task_created"
+    )
+    
+    # Render notification message
+    notification_title, notification_body = _render_notification_template(
+        notification_template["title_template"] if notification_template else None,
+        notification_template["body_template"] if notification_template else None,
+        {
+            "workflowName": workflow_instance["workflow_definition_name"],
+            "stepLabel": step_definition["step_label"],
+            "stepCode": step_definition["step_code"],
+            "actorEmail": assignee_row["email"] if assignee_row else "",
+        },
+        fallback_title=f"Action required: {step_definition['step_label']}",
+        fallback_body=(
+            f"The workflow '{workflow_instance['workflow_definition_name']}' is waiting "
+            "for your action."
+        ),
+    )
+    
+    # Create notification
+    _create_notification(
+        cursor,
+        task_row["assigned_user_id"],
+        workflow_instance["id"],
+        step_instance["id"],
+        "task_assigned",
+        notification_title,
+        notification_body,
+    )
+```
+
+### Fallback Messages
+
+If no template is configured, the system uses default messages:
+
+- **Default Title**: `"Action required: {step_label}"`
+- **Default Body**: `"The workflow '{workflow_name}' is waiting for your action."`
+
+## Notification Delivery
+
+Notifications are delivered through the outbox pattern to ensure reliability.
+
+### Outbox Event
+
+When a notification is created, an outbox event is recorded:
+
+```python
+# From runtime.py:43-56
+def _record_outbox(
+    cursor,
+    aggregate_type: str,
+    aggregate_id,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    cursor.execute(
+        """INSERT INTO outbox_event (aggregate_type, aggregate_id, event_type, payload)
+           VALUES (%s, %s, %s, %s)""",
+        (aggregate_type, aggregate_id, event_type, Json(payload)),
+    )
+```
+
+### Outbox Schema
+
+```sql
+CREATE TABLE outbox_event (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    aggregate_type text NOT NULL,
+    aggregate_id uuid NOT NULL,
+    event_type text NOT NULL,
+    payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+    headers jsonb NOT NULL DEFAULT '{}'::jsonb,
+    status text NOT NULL DEFAULT 'pending',
+    available_at timestamptz NOT NULL DEFAULT now(),
+    claimed_at timestamptz,
+    claimed_by text,
+    published_at timestamptz,
+    retry_count integer NOT NULL DEFAULT 0,
+    max_attempts integer NOT NULL DEFAULT 20,
+    last_error text,
+    last_error_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+### Delivery Flow
+
+<Steps>
+  <Step title="Notification Created">
+    Notification row inserted into `notification` table
+  </Step>
+  
+  <Step title="Outbox Event Recorded">
+    Event written to `outbox_event` with status `pending`
+  </Step>
+  
+  <Step title="Worker Polls Outbox">
+    Background worker queries pending events
+  </Step>
+  
+  <Step title="Event Published">
+    Worker publishes event to RabbitMQ
+  </Step>
+  
+  <Step title="Consumer Processes">
+    Notification consumer sends in-app notification, email, etc.
+  </Step>
+  
+  <Step title="Event Marked Published">
+    Outbox event status updated to `published`
+  </Step>
+</Steps>
+
+<Note>
+The outbox pattern ensures notifications are never lost, even if RabbitMQ is temporarily unavailable.
+</Note>
+
+## Realtime Events
+
+In addition to the outbox, realtime events are published for instant UI updates.
+
+### Realtime Event Publishing
+
+```python
+# From runtime.py:121-128
+publish_realtime_event(
+    cursor,
+    "runtime.notifications.changed",
+    channels=["notifications"],
+    users=[user_id],
+    workflow_instance_id=str(workflow_instance_id) if workflow_instance_id else None,
+    notification_id=str(notification_id),
+)
+```
+
+The frontend can subscribe to these events to show notifications immediately without polling.
+
+## Notification API
+
+### Get My Notifications
+
+Retrieve notifications for the current user:
+
+```http
+GET /api/v1/me/notifications
+```
+
+Implementation would query:
+
+```sql
+SELECT * FROM notification
+WHERE user_id = $1
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+### Mark as Read
+
+Mark a notification as read:
+
+```http
+POST /api/v1/notifications/{notification_id}/read
+```
+
+Implementation:
+
+```sql
+UPDATE notification
+SET is_read = true, read_at = now()
+WHERE id = $1 AND user_id = $2;
+```
+
+### Unread Count
+
+Get count of unread notifications:
+
+```sql
+SELECT COUNT(*) AS unread_count
+FROM notification
+WHERE user_id = $1 AND is_read = false;
+```
+
+## Priority Chain Escalation Notifications
+
+When a task escalates to the next user in a priority chain, a new notification is sent.
+
+### Escalation Notification
+
+From `runtime.py:1396-1441`:
+
+```python
+if next_task:
+    advance = False
+    cursor.execute(
+        "UPDATE human_task SET status = 'open' WHERE id = %s",
+        (next_task["id"],)
+    )
+    
+    if next_task["assigned_user_id"]:
+        cursor.execute('SELECT email FROM "user" WHERE id = %s', (next_task["assigned_user_id"],))
+        assignee_row = cursor.fetchone()
+        
+        cursor.execute(
+            """SELECT * FROM notification_template 
+               WHERE workflow_version_id = %s AND step_definition_id = %s AND event_type = 'task_created'""", 
+            (task_row["workflow_version_id"], task_row["step_definition_id"])
+        )
+        notification_template = cursor.fetchone()
+        
+        notification_title, notification_body = _render_notification_template(
+            notification_template["title_template"] if notification_template else None,
+            notification_template["body_template"] if notification_template else None,
+            {
+                "workflowName": task_row["workflow_definition_name"],
+                "stepLabel": task_row["step_label"],
+                "stepCode": task_row["step_code"],
+                "actorEmail": assignee_row["email"] if assignee_row else "",
+            },
+            fallback_title=f"Action required: {task_row['step_label']}",
+            fallback_body=f"The workflow '{task_row['workflow_definition_name']}' is waiting for your action.",
+        )
+        
+        _create_notification(
+            cursor,
+            next_task["assigned_user_id"],
+            task_row["workflow_instance_id"],
+            task_row["step_instance_id"],
+            "task_assigned",
+            notification_title,
+            notification_body,
+        )
+```
+
+## Notification Storage
+
+Template storage when creating workflow versions:
+
+```python
+# From workflows.py:562-594
+if step.notificationTemplate and (
+    step.notificationTemplate.titleTemplate or step.notificationTemplate.bodyTemplate
+):
+    cursor.execute(
+        """INSERT INTO notification_template (
+            workflow_version_id,
+            step_definition_id,
+            event_type,
+            channel,
+            title_template,
+            body_template,
+            allow_actor_override,
+            supported_variables
+        ) VALUES (%s, %s, 'task_created', 'in_app', %s, %s, %s, %s)""",
+        (
+            version_id,
+            step_id,
+            step.notificationTemplate.titleTemplate,
+            step.notificationTemplate.bodyTemplate,
+            step.notificationTemplate.allowActorOverride,
+            Json(
+                [
+                    "workflowName",
+                    "stepLabel",
+                    "stepCode",
+                    "actorEmail",
+                ]
+            ),
+        ),
+    )
+```
+
+## Future Enhancements
+
+<AccordionGroup>
+  <Accordion title="Multi-Channel Delivery">
+    Support for email, SMS, Slack, and webhook notifications in addition to in-app
+  </Accordion>
+  
+  <Accordion title="Notification Preferences">
+    User preferences for notification types and delivery channels
+  </Accordion>
+  
+  <Accordion title="Digest Mode">
+    Batch multiple notifications into periodic digests
+  </Accordion>
+  
+  <Accordion title="Rich Templates">
+    Markdown support, dynamic links, and action buttons in notification bodies
+  </Accordion>
+  
+  <Accordion title="Conditional Notifications">
+    Send notifications based on workflow context (e.g., only for high-value invoices)
+  </Accordion>
+  
+  <Accordion title="Notification History">
+    Archival and search of historical notifications
+  </Accordion>
+</AccordionGroup>
+
+<Card title="Related Concepts" icon="link">
+  - [Human Tasks](/concepts/human-tasks) - Task assignment and actions
+  - [Steps](/concepts/steps) - Step configuration and templates
+</Card>
+
+## Implementation References
+
+- **Notification Creation**: `apps/api/src/api/runtime.py:82-128`
+- **Template Rendering**: `apps/api/src/api/runtime.py:131-145`
+- **Task Assignment**: `apps/api/src/api/runtime.py:464-506`
+- **Template Storage**: `apps/api/src/api/workflows.py:562-594`
+- **Schema Definitions**: `apps/api/src/api/workflow_schemas.py:36-40`
+- **Database Schema**: `infra/postgres/init/01_foundation.sql:160-171, 271-282`

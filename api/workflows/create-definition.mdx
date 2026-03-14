@@ -1,0 +1,732 @@
+---
+title: Create Workflow Definition
+api: POST /api/v1/workflow-definitions
+---
+
+Creates a new workflow definition with an initial draft version. This establishes the structure, steps, and transitions for a new workflow.
+
+## Authentication
+
+Requires Bearer token authentication. The authenticated user will be recorded as the workflow creator.
+
+## Request Body
+
+<ParamField body="key" type="string" required>
+  Unique identifier key for the workflow definition. Must be unique across all workflows. Used for programmatic references.
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  Human-readable name for the workflow.
+</ParamField>
+
+<ParamField body="description" type="string" default="">
+  Detailed description of the workflow's purpose and behavior.
+</ParamField>
+
+<ParamField body="builderLayout" type="object" default="{}">
+  Visual layout information for the workflow builder UI. Includes node positions, edges, and viewport settings. If not provided, a default layout will be generated.
+</ParamField>
+
+<ParamField body="steps" type="array" required>
+  Array of workflow steps. At least one step is required.
+  
+  <ParamField body="steps[].stepCode" type="string" required>
+    Unique code identifier for the step within this workflow.
+  </ParamField>
+  
+  <ParamField body="steps[].stepLabel" type="string" required>
+    Human-readable label for the step.
+  </ParamField>
+  
+  <ParamField body="steps[].description" type="string" default="">
+    Description of the step's purpose.
+  </ParamField>
+  
+  <ParamField body="steps[].stepType" type="string" required>
+    Type of step. One of: `start`, `end`, `human_task`, `system_task`, `subworkflow`, `decision`.
+  </ParamField>
+  
+  <ParamField body="steps[].sequenceHint" type="integer" default="0">
+    Suggested ordering for display purposes.
+  </ParamField>
+  
+  <ParamField body="steps[].allowRevert" type="boolean" default="true">
+    Whether this step can be reverted to.
+  </ParamField>
+  
+  <ParamField body="steps[].remarkRequiredOnApprove" type="boolean" default="false">
+    Whether a remark/comment is required when approving this step.
+  </ParamField>
+  
+  <ParamField body="steps[].remarkRequiredOnReject" type="boolean" default="false">
+    Whether a remark/comment is required when rejecting this step.
+  </ParamField>
+  
+  <ParamField body="steps[].remarkRequiredOnRevert" type="boolean" default="false">
+    Whether a remark/comment is required when reverting from this step.
+  </ParamField>
+  
+  <ParamField body="steps[].maxVisitsPerInstance" type="integer | null" default="null">
+    Maximum number of times a workflow instance can visit this step. Used to prevent infinite loops.
+  </ParamField>
+  
+  <ParamField body="steps[].formSchema" type="object" default="{}">
+    JSON Schema defining the form structure for human tasks.
+  </ParamField>
+  
+  <ParamField body="steps[].config" type="object" default="{}">
+    Additional configuration data for the step.
+  </ParamField>
+  
+  <ParamField body="steps[].isTerminal" type="boolean" default="false">
+    Whether this step marks the end of the workflow.
+  </ParamField>
+  
+  <ParamField body="steps[].notificationTemplate" type="object | null" default="null">
+    Notification template for task creation events.
+    
+    <ParamField body="steps[].notificationTemplate.titleTemplate" type="string" default="">
+      Template for notification title. Supports variables like `{{workflowName}}`, `{{stepLabel}}`.
+    </ParamField>
+    
+    <ParamField body="steps[].notificationTemplate.bodyTemplate" type="string" default="">
+      Template for notification body.
+    </ParamField>
+    
+    <ParamField body="steps[].notificationTemplate.allowActorOverride" type="boolean" default="true">
+      Whether the actor can customize the notification.
+    </ParamField>
+  </ParamField>
+  
+  <ParamField body="steps[].subworkflowMapping" type="object | null" default="null">
+    Configuration for subworkflow steps (required if stepType is `subworkflow`).
+    
+    <ParamField body="steps[].subworkflowMapping.childWorkflowDefinitionId" type="UUID | null" default="null">
+      ID of the child workflow definition.
+    </ParamField>
+    
+    <ParamField body="steps[].subworkflowMapping.childWorkflowVersionId" type="UUID | null" default="null">
+      Specific version ID of the child workflow.
+    </ParamField>
+    
+    <ParamField body="steps[].subworkflowMapping.triggerMode" type="string" default="sync_wait">
+      How to trigger the subworkflow. One of: `sync_wait`, `async_wait`.
+    </ParamField>
+    
+    <ParamField body="steps[].subworkflowMapping.inputMapping" type="object" default="{}">
+      Mapping of parent workflow data to child workflow input.
+    </ParamField>
+    
+    <ParamField body="steps[].subworkflowMapping.outputMapping" type="object" default="{}">
+      Mapping of child workflow output to parent workflow context.
+    </ParamField>
+    
+    <ParamField body="steps[].subworkflowMapping.completionAction" type="string" default="approve">
+      Action to take when subworkflow completes. One of: `approve`, `reject`, `revert`, `custom`.
+    </ParamField>
+    
+    <ParamField body="steps[].subworkflowMapping.failureAction" type="string" default="reject">
+      Action to take when subworkflow fails.
+    </ParamField>
+  </ParamField>
+  
+  <ParamField body="steps[].assignmentPolicy" type="object" default="{}">
+    Policy for assigning and approving tasks.
+    
+    <ParamField body="steps[].assignmentPolicy.approvalMode" type="string" default="priority_chain">
+      Approval mode. One of: `priority_chain`, `approve_any_one`, `approve_all`, `notify_all`.
+    </ParamField>
+    
+    <ParamField body="steps[].assignmentPolicy.requiredApprovalsCount" type="integer | null" default="null">
+      Number of required approvals (for approve_all mode).
+    </ParamField>
+    
+    <ParamField body="steps[].assignmentPolicy.priorityEscalationEnabled" type="boolean" default="false">
+      Whether to escalate to next priority level after timeout.
+    </ParamField>
+    
+    <ParamField body="steps[].assignmentPolicy.escalationTimeoutSeconds" type="integer | null" default="null">
+      Seconds before escalating to next priority level.
+    </ParamField>
+    
+    <ParamField body="steps[].assignmentPolicy.reminderIntervalSeconds" type="integer | null" default="null">
+      Interval for sending reminder notifications.
+    </ParamField>
+    
+    <ParamField body="steps[].assignmentPolicy.maxEscalationCount" type="integer | null" default="null">
+      Maximum number of escalation levels.
+    </ParamField>
+  </ParamField>
+  
+  <ParamField body="steps[].associations" type="array" default="[]">
+    Users, roles, or groups assigned to this step.
+    
+    <ParamField body="steps[].associations[].associationType" type="string" required>
+      Type of association. One of: `user`, `role`, `group`, `sql_rule`.
+    </ParamField>
+    
+    <ParamField body="steps[].associations[].associationValue" type="string" required>
+      The user ID, role name, group name, or SQL expression.
+    </ParamField>
+    
+    <ParamField body="steps[].associations[].canApprove" type="boolean" default="true">
+      Whether this association can approve.
+    </ParamField>
+    
+    <ParamField body="steps[].associations[].canReject" type="boolean" default="true">
+      Whether this association can reject.
+    </ParamField>
+    
+    <ParamField body="steps[].associations[].canRevert" type="boolean" default="true">
+      Whether this association can revert.
+    </ParamField>
+    
+    <ParamField body="steps[].associations[].priority" type="integer | null" default="null">
+      Priority level for priority_chain mode.
+    </ParamField>
+    
+    <ParamField body="steps[].associations[].notificationOrder" type="integer | null" default="null">
+      Order for notifications.
+    </ParamField>
+    
+    <ParamField body="steps[].associations[].escalationAfterSeconds" type="integer | null" default="null">
+      Seconds before escalating this specific association.
+    </ParamField>
+  </ParamField>
+</ParamField>
+
+<ParamField body="transitions" type="array" required>
+  Array of transitions between steps. Defines the workflow graph.
+  
+  <ParamField body="transitions[].fromStepCode" type="string" required>
+    Code of the source step.
+  </ParamField>
+  
+  <ParamField body="transitions[].toStepCode" type="string | null" default="null">
+    Code of the target step, or null for terminal transitions.
+  </ParamField>
+  
+  <ParamField body="transitions[].actionType" type="string" required>
+    Action that triggers this transition. One of: `approve`, `reject`, `revert`, `custom`.
+  </ParamField>
+  
+  <ParamField body="transitions[].actionCode" type="string | null" default="null">
+    Custom action code (required if actionType is `custom`).
+  </ParamField>
+  
+  <ParamField body="transitions[].transitionLabel" type="string" default="">
+    Human-readable label for the transition.
+  </ParamField>
+  
+  <ParamField body="transitions[].description" type="string" default="">
+    Description of the transition.
+  </ParamField>
+  
+  <ParamField body="transitions[].conditionExpression" type="string | null" default="null">
+    Optional condition expression that must evaluate to true for this transition to be taken.
+  </ParamField>
+  
+  <ParamField body="transitions[].priority" type="integer" default="0">
+    Priority for evaluating transitions (higher priority evaluated first).
+  </ParamField>
+</ParamField>
+
+## Response
+
+<ResponseField name="item" type="object">
+  The created workflow definition with full details.
+  
+  <ResponseField name="item.id" type="UUID">
+    Unique identifier for the workflow definition.
+  </ResponseField>
+  
+  <ResponseField name="item.key" type="string">
+    The unique key for the workflow.
+  </ResponseField>
+  
+  <ResponseField name="item.name" type="string">
+    The workflow name.
+  </ResponseField>
+  
+  <ResponseField name="item.description" type="string">
+    The workflow description.
+  </ResponseField>
+  
+  <ResponseField name="item.status" type="string">
+    Current status. Will be `draft` for new workflows.
+  </ResponseField>
+  
+  <ResponseField name="item.latestVersionId" type="UUID">
+    ID of the latest version.
+  </ResponseField>
+  
+  <ResponseField name="item.latestVersionNo" type="integer">
+    Version number (starts at 1).
+  </ResponseField>
+  
+  <ResponseField name="item.graphJson" type="object">
+    Structured workflow graph data.
+  </ResponseField>
+  
+  <ResponseField name="item.builderLayout" type="object">
+    Visual layout for the builder UI.
+  </ResponseField>
+  
+  <ResponseField name="item.steps" type="array">
+    Array of step definitions with full details including IDs and all nested objects.
+  </ResponseField>
+  
+  <ResponseField name="item.transitions" type="array">
+    Array of transition definitions with IDs.
+  </ResponseField>
+</ResponseField>
+
+## Example Request
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://api.example.com/api/v1/workflow-definitions \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "expense-approval",
+    "name": "Expense Approval Workflow",
+    "description": "Multi-level approval workflow for expense requests",
+    "steps": [
+      {
+        "stepCode": "start",
+        "stepLabel": "Start",
+        "stepType": "start",
+        "sequenceHint": 1,
+        "assignmentPolicy": {}
+      },
+      {
+        "stepCode": "manager_review",
+        "stepLabel": "Manager Review",
+        "stepType": "human_task",
+        "sequenceHint": 2,
+        "remarkRequiredOnReject": true,
+        "assignmentPolicy": {
+          "approvalMode": "approve_any_one"
+        },
+        "associations": [
+          {
+            "associationType": "role",
+            "associationValue": "manager",
+            "canApprove": true,
+            "canReject": true
+          }
+        ]
+      },
+      {
+        "stepCode": "end",
+        "stepLabel": "End",
+        "stepType": "end",
+        "sequenceHint": 3,
+        "isTerminal": true,
+        "assignmentPolicy": {}
+      }
+    ],
+    "transitions": [
+      {
+        "fromStepCode": "start",
+        "toStepCode": "manager_review",
+        "actionType": "approve",
+        "transitionLabel": "Submit for Review"
+      },
+      {
+        "fromStepCode": "manager_review",
+        "toStepCode": "end",
+        "actionType": "approve",
+        "transitionLabel": "Approve"
+      },
+      {
+        "fromStepCode": "manager_review",
+        "toStepCode": null,
+        "actionType": "reject",
+        "transitionLabel": "Reject"
+      }
+    ]
+  }'
+```
+
+```javascript JavaScript
+const response = await fetch('https://api.example.com/api/v1/workflow-definitions', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer YOUR_TOKEN',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    key: 'expense-approval',
+    name: 'Expense Approval Workflow',
+    description: 'Multi-level approval workflow for expense requests',
+    steps: [
+      {
+        stepCode: 'start',
+        stepLabel: 'Start',
+        stepType: 'start',
+        sequenceHint: 1,
+        assignmentPolicy: {}
+      },
+      {
+        stepCode: 'manager_review',
+        stepLabel: 'Manager Review',
+        stepType: 'human_task',
+        sequenceHint: 2,
+        remarkRequiredOnReject: true,
+        assignmentPolicy: {
+          approvalMode: 'approve_any_one'
+        },
+        associations: [
+          {
+            associationType: 'role',
+            associationValue: 'manager',
+            canApprove: true,
+            canReject: true
+          }
+        ]
+      },
+      {
+        stepCode: 'end',
+        stepLabel: 'End',
+        stepType: 'end',
+        sequenceHint: 3,
+        isTerminal: true,
+        assignmentPolicy: {}
+      }
+    ],
+    transitions: [
+      {
+        fromStepCode: 'start',
+        toStepCode: 'manager_review',
+        actionType: 'approve',
+        transitionLabel: 'Submit for Review'
+      },
+      {
+        fromStepCode: 'manager_review',
+        toStepCode: 'end',
+        actionType: 'approve',
+        transitionLabel: 'Approve'
+      },
+      {
+        fromStepCode: 'manager_review',
+        toStepCode: null,
+        actionType: 'reject',
+        transitionLabel: 'Reject'
+      }
+    ]
+  })
+});
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.post(
+    'https://api.example.com/api/v1/workflow-definitions',
+    headers={
+        'Authorization': 'Bearer YOUR_TOKEN',
+        'Content-Type': 'application/json'
+    },
+    json={
+        'key': 'expense-approval',
+        'name': 'Expense Approval Workflow',
+        'description': 'Multi-level approval workflow for expense requests',
+        'steps': [
+            {
+                'stepCode': 'start',
+                'stepLabel': 'Start',
+                'stepType': 'start',
+                'sequenceHint': 1,
+                'assignmentPolicy': {}
+            },
+            {
+                'stepCode': 'manager_review',
+                'stepLabel': 'Manager Review',
+                'stepType': 'human_task',
+                'sequenceHint': 2,
+                'remarkRequiredOnReject': True,
+                'assignmentPolicy': {
+                    'approvalMode': 'approve_any_one'
+                },
+                'associations': [
+                    {
+                        'associationType': 'role',
+                        'associationValue': 'manager',
+                        'canApprove': True,
+                        'canReject': True
+                    }
+                ]
+            },
+            {
+                'stepCode': 'end',
+                'stepLabel': 'End',
+                'stepType': 'end',
+                'sequenceHint': 3,
+                'isTerminal': True,
+                'assignmentPolicy': {}
+            }
+        ],
+        'transitions': [
+            {
+                'fromStepCode': 'start',
+                'toStepCode': 'manager_review',
+                'actionType': 'approve',
+                'transitionLabel': 'Submit for Review'
+            },
+            {
+                'fromStepCode': 'manager_review',
+                'toStepCode': 'end',
+                'actionType': 'approve',
+                'transitionLabel': 'Approve'
+            },
+            {
+                'fromStepCode': 'manager_review',
+                'toStepCode': None,
+                'actionType': 'reject',
+                'transitionLabel': 'Reject'
+            }
+        ]
+    }
+)
+
+data = response.json()
+```
+
+</CodeGroup>
+
+## Example Response
+
+```json
+{
+  "item": {
+    "id": "9a7b8c9d-1234-5678-90ab-cdef12345678",
+    "key": "expense-approval",
+    "name": "Expense Approval Workflow",
+    "description": "Multi-level approval workflow for expense requests",
+    "status": "draft",
+    "latestVersionId": "1a2b3c4d-5678-90ab-cdef-123456789012",
+    "latestVersionNo": 1,
+    "graphJson": {
+      "workflow": {
+        "key": "expense-approval",
+        "name": "Expense Approval Workflow",
+        "description": "Multi-level approval workflow for expense requests"
+      },
+      "steps": [...],
+      "transitions": [...]
+    },
+    "builderLayout": {
+      "nodes": [
+        {
+          "id": "start",
+          "position": {"x": 0, "y": 120},
+          "data": {"label": "Start", "stepType": "start"}
+        },
+        {
+          "id": "manager_review",
+          "position": {"x": 220, "y": 40},
+          "data": {"label": "Manager Review", "stepType": "human_task"}
+        },
+        {
+          "id": "end",
+          "position": {"x": 440, "y": 120},
+          "data": {"label": "End", "stepType": "end"}
+        }
+      ],
+      "edges": [...],
+      "viewport": {"x": 0, "y": 0, "zoom": 1}
+    },
+    "steps": [
+      {
+        "id": "step-uuid-1",
+        "stepCode": "start",
+        "stepLabel": "Start",
+        "description": "",
+        "stepType": "start",
+        "sequenceHint": 1,
+        "allowRevert": true,
+        "remarkRequiredOnApprove": false,
+        "remarkRequiredOnReject": false,
+        "remarkRequiredOnRevert": false,
+        "maxVisitsPerInstance": null,
+        "formSchema": {},
+        "config": {},
+        "isTerminal": false,
+        "notificationTemplate": null,
+        "subworkflowMapping": null,
+        "assignmentPolicy": {
+          "id": "policy-uuid-1",
+          "approvalMode": "priority_chain",
+          "requiredApprovalsCount": null,
+          "priorityEscalationEnabled": false,
+          "escalationTimeoutSeconds": null,
+          "reminderIntervalSeconds": null,
+          "maxEscalationCount": null
+        },
+        "associations": []
+      },
+      {
+        "id": "step-uuid-2",
+        "stepCode": "manager_review",
+        "stepLabel": "Manager Review",
+        "description": "",
+        "stepType": "human_task",
+        "sequenceHint": 2,
+        "allowRevert": true,
+        "remarkRequiredOnApprove": false,
+        "remarkRequiredOnReject": true,
+        "remarkRequiredOnRevert": false,
+        "maxVisitsPerInstance": null,
+        "formSchema": {},
+        "config": {},
+        "isTerminal": false,
+        "notificationTemplate": null,
+        "subworkflowMapping": null,
+        "assignmentPolicy": {
+          "id": "policy-uuid-2",
+          "approvalMode": "approve_any_one",
+          "requiredApprovalsCount": null,
+          "priorityEscalationEnabled": false,
+          "escalationTimeoutSeconds": null,
+          "reminderIntervalSeconds": null,
+          "maxEscalationCount": null
+        },
+        "associations": [
+          {
+            "id": "assoc-uuid-1",
+            "associationType": "role",
+            "associationValue": "manager",
+            "canApprove": true,
+            "canReject": true,
+            "canRevert": true,
+            "priority": null,
+            "notificationOrder": null,
+            "escalationAfterSeconds": null
+          }
+        ]
+      },
+      {
+        "id": "step-uuid-3",
+        "stepCode": "end",
+        "stepLabel": "End",
+        "description": "",
+        "stepType": "end",
+        "sequenceHint": 3,
+        "allowRevert": true,
+        "remarkRequiredOnApprove": false,
+        "remarkRequiredOnReject": false,
+        "remarkRequiredOnRevert": false,
+        "maxVisitsPerInstance": null,
+        "formSchema": {},
+        "config": {},
+        "isTerminal": true,
+        "notificationTemplate": null,
+        "subworkflowMapping": null,
+        "assignmentPolicy": {
+          "id": "policy-uuid-3",
+          "approvalMode": "priority_chain",
+          "requiredApprovalsCount": null,
+          "priorityEscalationEnabled": false,
+          "escalationTimeoutSeconds": null,
+          "reminderIntervalSeconds": null,
+          "maxEscalationCount": null
+        },
+        "associations": []
+      }
+    ],
+    "transitions": [
+      {
+        "id": "trans-uuid-1",
+        "fromStepCode": "start",
+        "toStepCode": "manager_review",
+        "actionType": "approve",
+        "actionCode": null,
+        "transitionLabel": "Submit for Review",
+        "description": "",
+        "conditionExpression": null,
+        "priority": 0
+      },
+      {
+        "id": "trans-uuid-2",
+        "fromStepCode": "manager_review",
+        "toStepCode": "end",
+        "actionType": "approve",
+        "actionCode": null,
+        "transitionLabel": "Approve",
+        "description": "",
+        "conditionExpression": null,
+        "priority": 0
+      },
+      {
+        "id": "trans-uuid-3",
+        "fromStepCode": "manager_review",
+        "toStepCode": null,
+        "actionType": "reject",
+        "actionCode": null,
+        "transitionLabel": "Reject",
+        "description": "",
+        "conditionExpression": null,
+        "priority": 0
+      }
+    ]
+  }
+}
+```
+
+## Status Codes
+
+<ResponseField name="201" type="Created">
+  Workflow definition created successfully.
+</ResponseField>
+
+<ResponseField name="401" type="Unauthorized">
+  Missing or invalid authentication token.
+</ResponseField>
+
+<ResponseField name="409" type="Conflict">
+  A workflow with this key already exists.
+</ResponseField>
+
+<ResponseField name="422" type="Unprocessable Entity">
+  Validation failed. Common validation errors:
+  - Step codes must be unique
+  - Exactly one start step is required
+  - At least one terminal or end step is required
+  - Transition source or target step does not exist
+  - Custom action transitions require an actionCode
+  - Unconditional self-loop detected
+  - Step must have at least one outgoing transition (unless terminal)
+  - Every step must be reachable from the start step
+  - Cycle detected without maxVisitsPerInstance guard
+  - Subworkflow step requires subworkflowMapping
+</ResponseField>
+
+## Validation Rules
+
+### Workflow Structure
+
+- **Unique step codes**: All step codes within a workflow must be unique
+- **Single start step**: Exactly one step with `stepType: "start"` is required
+- **Terminal steps**: At least one step must be terminal (`isTerminal: true` or `stepType: "end"`)
+- **Reachability**: All steps must be reachable from the start step
+
+### Transitions
+
+- **Valid references**: Both `fromStepCode` and `toStepCode` must reference existing steps
+- **Custom actions**: Transitions with `actionType: "custom"` must include an `actionCode`
+- **Unconditional transitions**: Only one unconditional transition allowed per source step and action type
+- **Self-loops**: Unconditional self-loops are not allowed
+- **Outgoing transitions**: Non-terminal steps must have at least one outgoing transition
+
+### Cycles
+
+- **Loop guards**: Cycles (loops) are allowed but at least one step in the cycle must have `maxVisitsPerInstance` set to prevent infinite loops
+
+### Subworkflows
+
+- **Required mapping**: Steps with `stepType: "subworkflow"` must include a `subworkflowMapping` object

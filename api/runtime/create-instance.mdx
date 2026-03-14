@@ -1,0 +1,296 @@
+---
+title: Create Workflow Instance
+api: POST /api/v1/workflow-instances
+---
+
+Starts a new workflow instance from a workflow definition.
+
+## Authentication
+
+Requires Bearer token authentication. The authenticated user will be recorded as the workflow initiator.
+
+## Request Body
+
+<ParamField body="workflowDefinitionId" type="UUID">
+  The unique identifier of the workflow definition. Either this or `workflowKey` is required.
+</ParamField>
+
+<ParamField body="workflowKey" type="string">
+  The key of the workflow definition. Either this or `workflowDefinitionId` is required.
+</ParamField>
+
+<ParamField body="businessKey" type="string">
+  Optional business identifier for this workflow instance. Used for tracking and correlation purposes.
+</ParamField>
+
+<ParamField body="inputData" type="object" default="{}">
+  Initial input data for the workflow. This data is available to all steps in the workflow.
+</ParamField>
+
+<ParamField body="contextData" type="object" default="{}">
+  Initial context data for the workflow. Context data can be modified as the workflow progresses through steps.
+</ParamField>
+
+## Response
+
+<ResponseField name="item" type="object">
+  The created workflow instance with full details.
+  
+  <ResponseField name="item.id" type="UUID">
+    Unique identifier for the workflow instance.
+  </ResponseField>
+  
+  <ResponseField name="item.workflowDefinitionId" type="UUID">
+    The workflow definition this instance belongs to.
+  </ResponseField>
+  
+  <ResponseField name="item.workflowDefinitionKey" type="string">
+    The key of the workflow definition.
+  </ResponseField>
+  
+  <ResponseField name="item.workflowDefinitionName" type="string">
+    Human-readable name of the workflow.
+  </ResponseField>
+  
+  <ResponseField name="item.workflowVersionId" type="UUID">
+    The specific version of the workflow definition being executed.
+  </ResponseField>
+  
+  <ResponseField name="item.businessKey" type="string | null">
+    The business key provided at creation time.
+  </ResponseField>
+  
+  <ResponseField name="item.runNumber" type="integer">
+    Sequential run number for this business key. Starts at 1 for each unique business key.
+  </ResponseField>
+  
+  <ResponseField name="item.status" type="string">
+    Current workflow status. One of: `running`, `waiting`, `paused`, `completed`, `rejected`, `failed`, `cancelled`.
+  </ResponseField>
+  
+  <ResponseField name="item.currentStepCode" type="string | null">
+    Code identifier of the current step.
+  </ResponseField>
+  
+  <ResponseField name="item.currentStepLabel" type="string | null">
+    Human-readable label of the current step.
+  </ResponseField>
+  
+  <ResponseField name="item.startedBy" type="string">
+    User ID of the workflow initiator.
+  </ResponseField>
+  
+  <ResponseField name="item.startedAt" type="string">
+    ISO 8601 timestamp when the workflow started.
+  </ResponseField>
+  
+  <ResponseField name="item.completedAt" type="string | null">
+    ISO 8601 timestamp when the workflow completed (if applicable).
+  </ResponseField>
+  
+  <ResponseField name="item.inputData" type="object">
+    The input data provided at creation.
+  </ResponseField>
+  
+  <ResponseField name="item.contextData" type="object">
+    Current context data (may be modified by workflow steps).
+  </ResponseField>
+  
+  <ResponseField name="item.outputData" type="object">
+    Output data (populated when workflow completes).
+  </ResponseField>
+  
+  <ResponseField name="item.graphJson" type="object">
+    The workflow graph structure.
+  </ResponseField>
+  
+  <ResponseField name="item.builderLayout" type="object">
+    Layout information for the workflow builder.
+  </ResponseField>
+  
+  <ResponseField name="item.steps" type="array">
+    Array of step instances that have been executed.
+  </ResponseField>
+  
+  <ResponseField name="item.actions" type="array">
+    Array of actions performed on the workflow.
+  </ResponseField>
+</ResponseField>
+
+## Example Request
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://api.example.com/api/v1/workflow-instances \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workflowKey": "expense-approval",
+    "businessKey": "EXP-2024-001",
+    "inputData": {
+      "amount": 1500.00,
+      "currency": "USD",
+      "category": "travel",
+      "requestedBy": "john.doe@company.com",
+      "description": "Conference travel expenses"
+    },
+    "contextData": {
+      "department": "engineering",
+      "costCenter": "CC-1001"
+    }
+  }'
+```
+
+```javascript JavaScript
+const response = await fetch('https://api.example.com/api/v1/workflow-instances', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer YOUR_TOKEN',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    workflowKey: 'expense-approval',
+    businessKey: 'EXP-2024-001',
+    inputData: {
+      amount: 1500.00,
+      currency: 'USD',
+      category: 'travel',
+      requestedBy: 'john.doe@company.com',
+      description: 'Conference travel expenses'
+    },
+    contextData: {
+      department: 'engineering',
+      costCenter: 'CC-1001'
+    }
+  })
+});
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.post(
+    'https://api.example.com/api/v1/workflow-instances',
+    headers={
+        'Authorization': 'Bearer YOUR_TOKEN',
+        'Content-Type': 'application/json'
+    },
+    json={
+        'workflowKey': 'expense-approval',
+        'businessKey': 'EXP-2024-001',
+        'inputData': {
+            'amount': 1500.00,
+            'currency': 'USD',
+            'category': 'travel',
+            'requestedBy': 'john.doe@company.com',
+            'description': 'Conference travel expenses'
+        },
+        'contextData': {
+            'department': 'engineering',
+            'costCenter': 'CC-1001'
+        }
+    }
+)
+
+data = response.json()
+```
+
+</CodeGroup>
+
+## Example Response
+
+```json
+{
+  "item": {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "workflowDefinitionId": "987e6543-e21b-12d3-a456-426614174999",
+    "workflowDefinitionKey": "expense-approval",
+    "workflowDefinitionName": "Expense Approval Workflow",
+    "workflowVersionId": "456e7890-e12b-12d3-a456-426614174111",
+    "businessKey": "EXP-2024-001",
+    "runNumber": 1,
+    "status": "waiting",
+    "currentStepCode": "manager_review",
+    "currentStepLabel": "Manager Review",
+    "startedBy": "user-123",
+    "startedAt": "2024-03-14T10:30:00Z",
+    "completedAt": null,
+    "inputData": {
+      "amount": 1500.00,
+      "currency": "USD",
+      "category": "travel",
+      "requestedBy": "john.doe@company.com",
+      "description": "Conference travel expenses"
+    },
+    "contextData": {
+      "department": "engineering",
+      "costCenter": "CC-1001"
+    },
+    "outputData": {},
+    "graphJson": {},
+    "builderLayout": {},
+    "steps": [
+      {
+        "id": "step-001",
+        "stepCode": "start",
+        "stepLabel": "Start",
+        "stepType": "start",
+        "status": "completed",
+        "visitCount": 1,
+        "enteredAt": "2024-03-14T10:30:00Z",
+        "completedAt": "2024-03-14T10:30:01Z",
+        "waitingSince": null,
+        "resultAction": "approve"
+      },
+      {
+        "id": "step-002",
+        "stepCode": "manager_review",
+        "stepLabel": "Manager Review",
+        "stepType": "human_task",
+        "status": "waiting",
+        "visitCount": 1,
+        "enteredAt": "2024-03-14T10:30:01Z",
+        "completedAt": null,
+        "waitingSince": "2024-03-14T10:30:01Z",
+        "resultAction": null
+      }
+    ],
+    "actions": [
+      {
+        "id": "action-001",
+        "actionType": "start",
+        "actionCode": null,
+        "actorUserId": "user-123",
+        "actorType": "user",
+        "remarkText": null,
+        "payload": {
+          "workflowDefinitionKey": "expense-approval",
+          "businessKey": "EXP-2024-001"
+        },
+        "createdAt": "2024-03-14T10:30:00Z"
+      }
+    ]
+  }
+}
+```
+
+## Status Codes
+
+<ResponseField name="201" type="Created">
+  Workflow instance created successfully.
+</ResponseField>
+
+<ResponseField name="401" type="Unauthorized">
+  Missing or invalid authentication token.
+</ResponseField>
+
+<ResponseField name="404" type="Not Found">
+  Workflow definition not found.
+</ResponseField>
+
+<ResponseField name="422" type="Unprocessable Entity">
+  Invalid request. Either `workflowDefinitionId` or `workflowKey` must be provided.
+</ResponseField>

@@ -1,0 +1,577 @@
+---
+title: Step Configuration
+description: Complete guide to workflow step types, assignment policies, associations, and advanced features
+---
+
+Workflow steps are the building blocks of your workflow definition. Each step represents a distinct stage in the process, from the initial start to terminal completion or rejection.
+
+## Step Schema
+
+The complete step schema is defined in `workflow_schemas.py:52-71`:
+
+```python
+class WorkflowStepInput(BaseModel):
+    stepCode: str = Field(min_length=1)
+    stepLabel: str = Field(min_length=1)
+    description: str = ""
+    stepType: StepType  # "start" | "end" | "human_task" | "system_task" | "subworkflow" | "decision"
+    sequenceHint: int = 0
+    allowRevert: bool = True
+    remarkRequiredOnApprove: bool = False
+    remarkRequiredOnReject: bool = False
+    remarkRequiredOnRevert: bool = False
+    maxVisitsPerInstance: int | None = None
+    formSchema: dict = Field(default_factory=dict)
+    config: dict = Field(default_factory=dict)
+    isTerminal: bool = False
+    notificationTemplate: WorkflowNotificationTemplateInput | None = None
+    subworkflowMapping: WorkflowStepMappingInput | None = None
+    assignmentPolicy: WorkflowAssignmentPolicyInput = Field(default_factory=WorkflowAssignmentPolicyInput)
+    associations: list[WorkflowAssociationInput] = Field(default_factory=list)
+```
+
+## Step Types
+
+### Start Step
+
+**Purpose**: Entry point for all workflow instances.
+
+```json
+{
+  "stepCode": "start_request",
+  "stepLabel": "Start request",
+  "description": "Entry point for the workflow instance.",
+  "stepType": "start",
+  "sequenceHint": 0,
+  "allowRevert": false,
+  "isTerminal": false
+}
+```
+
+<Warning>
+  **Validation Rule**: Exactly one start step is required (workflows.py:79-81). The API will reject definitions with zero or multiple start steps.
+</Warning>
+
+### Human Task
+
+**Purpose**: Manual approval, review, or decision-making by assigned users.
+
+```json
+{
+  "stepCode": "manager_approval",
+  "stepLabel": "Manager approval",
+  "description": "Human review with sequential escalation.",
+  "stepType": "human_task",
+  "sequenceHint": 1,
+  "allowRevert": true,
+  "remarkRequiredOnApprove": false,
+  "remarkRequiredOnReject": true,
+  "remarkRequiredOnRevert": true,
+  "maxVisitsPerInstance": 3,
+  "assignmentPolicy": {
+    "approvalMode": "priority_chain",
+    "priorityEscalationEnabled": true,
+    "escalationTimeoutSeconds": 86400,
+    "reminderIntervalSeconds": 43200,
+    "maxEscalationCount": 2
+  },
+  "associations": [
+    {
+      "associationType": "user",
+      "associationValue": "manager@example.com",
+      "priority": 1,
+      "notificationOrder": 1,
+      "escalationAfterSeconds": 86400,
+      "canApprove": true,
+      "canReject": true,
+      "canRevert": true
+    }
+  ]
+}
+```
+
+**Key Fields**:
+- `remarkRequiredOnApprove`: Force users to leave a comment when approving
+- `remarkRequiredOnReject`: Force users to leave a comment when rejecting
+- `allowRevert`: Enable "send back" functionality
+- `maxVisitsPerInstance`: Prevent infinite loops (see Cycle Detection)
+
+### System Task
+
+**Purpose**: Automated processing steps that don't require human interaction.
+
+```json
+{
+  "stepCode": "auto_calculate",
+  "stepLabel": "Calculate totals",
+  "description": "Automatically sum line items.",
+  "stepType": "system_task",
+  "config": {
+    "handlerClass": "CalculateTotalsHandler",
+    "retryPolicy": { "maxAttempts": 3 }
+  }
+}
+```
+
+<Note>
+  System tasks typically don't have associations. The `config` field stores handler-specific configuration.
+</Note>
+
+### Subworkflow
+
+**Purpose**: Trigger a child workflow, wait for completion, and resume with mapped output.
+
+```json
+{
+  "stepCode": "background_check",
+  "stepLabel": "Background check",
+  "stepType": "subworkflow",
+  "subworkflowMapping": {
+    "childWorkflowDefinitionId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "childWorkflowVersionId": null,
+    "triggerMode": "sync_wait",
+    "inputMapping": {
+      "candidateName": "$.requestor.name",
+      "candidateEmail": "$.requestor.email"
+    },
+    "outputMapping": {
+      "bgCheckStatus": "$.result.status",
+      "bgCheckReport": "$.result.reportUrl"
+    },
+    "completionAction": "approve",
+    "failureAction": "reject"
+  }
+}
+```
+
+**Validation**: Subworkflow steps **must** have a `subworkflowMapping` (workflows.py:125-126).
+
+<AccordionGroup>
+  <Accordion title="Trigger Modes">
+    ```python
+    # From workflow_schemas.py:13
+    TriggerMode = Literal["sync_wait", "async_wait"]
+    ```
+    
+    - **sync_wait**: Block the parent until the child completes
+    - **async_wait**: Start the child and wait asynchronously (future implementation)
+  </Accordion>
+  
+  <Accordion title="Input Mapping">
+    Map parent instance context to child workflow input:
+    
+    ```json
+    {
+      "inputMapping": {
+        "childFieldName": "$.parent.context.path",
+        "amount": "$.requestData.totalAmount",
+        "department": "$.requestor.department"
+      }
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Output Mapping">
+    Map child workflow output back to parent context:
+    
+    ```json
+    {
+      "outputMapping": {
+        "approvalResult": "$.result.decision",
+        "approverComments": "$.result.remarks"
+      }
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Completion and Failure Actions">
+    Define which action to take after child completion or failure:
+    
+    ```json
+    {
+      "completionAction": "approve",  // or "reject", "revert", "custom"
+      "failureAction": "reject"       // or "approve", "revert", "custom"
+    }
+    ```
+    
+    The parent workflow will execute the corresponding transition based on the child result.
+  </Accordion>
+</AccordionGroup>
+
+### Decision
+
+**Purpose**: Conditional routing based on workflow context.
+
+```json
+{
+  "stepCode": "check_amount",
+  "stepLabel": "Check amount threshold",
+  "stepType": "decision",
+  "description": "Route based on request amount."
+}
+```
+
+Use with conditional transitions:
+
+```json
+[
+  {
+    "fromStepCode": "check_amount",
+    "toStepCode": "auto_approve",
+    "actionType": "approve",
+    "conditionExpression": "$.amount < 1000"
+  },
+  {
+    "fromStepCode": "check_amount",
+    "toStepCode": "manager_review",
+    "actionType": "approve",
+    "conditionExpression": "$.amount >= 1000"
+  }
+]
+```
+
+### End Step
+
+**Purpose**: Terminal step indicating workflow completion.
+
+```json
+{
+  "stepCode": "completed",
+  "stepLabel": "Completed",
+  "description": "Terminal success step.",
+  "stepType": "end",
+  "sequenceHint": 99,
+  "isTerminal": true
+}
+```
+
+<Warning>
+  At least one terminal or end step is required (workflows.py:83-87). Terminal steps don't need outgoing transitions.
+</Warning>
+
+## Assignment Policies
+
+Assignment policies control **how** users are assigned to human tasks and **when** escalation occurs.
+
+```python
+# From workflow_schemas.py:27-33
+class WorkflowAssignmentPolicyInput(BaseModel):
+    approvalMode: ApprovalMode = "priority_chain"  # "priority_chain" | "approve_any_one" | "approve_all" | "notify_all"
+    requiredApprovalsCount: int | None = None
+    priorityEscalationEnabled: bool = False
+    escalationTimeoutSeconds: int | None = None
+    reminderIntervalSeconds: int | None = None
+    maxEscalationCount: int | None = None
+```
+
+### Approval Modes
+
+<Tabs>
+  <Tab title="priority_chain">
+    Assigns to **priority 1** first. After `escalationTimeoutSeconds`, escalates to **priority 2**, then **priority 3**, etc.
+    
+    ```json
+    {
+      "approvalMode": "priority_chain",
+      "priorityEscalationEnabled": true,
+      "escalationTimeoutSeconds": 86400,
+      "reminderIntervalSeconds": 43200,
+      "maxEscalationCount": 2
+    }
+    ```
+    
+    **Use Case**: Manager → Senior Manager → Director escalation chain.
+  </Tab>
+  
+  <Tab title="approve_any_one">
+    Assigns to **all** associations simultaneously. The **first** approval completes the step.
+    
+    ```json
+    {
+      "approvalMode": "approve_any_one",
+      "requiredApprovalsCount": null
+    }
+    ```
+    
+    **Use Case**: Any team member can approve the request.
+  </Tab>
+  
+  <Tab title="approve_all">
+    Assigns to **all** associations. **Every** association must approve before the step completes.
+    
+    ```json
+    {
+      "approvalMode": "approve_all",
+      "requiredApprovalsCount": null  // or set to N for partial approval
+    }
+    ```
+    
+    **Use Case**: Legal, Finance, and HR must all approve a contract.
+  </Tab>
+  
+  <Tab title="notify_all">
+    Sends notifications to all associations but **doesn't wait** for approval. The step auto-completes.
+    
+    ```json
+    {
+      "approvalMode": "notify_all"
+    }
+    ```
+    
+    **Use Case**: FYI notifications to stakeholders.
+  </Tab>
+</Tabs>
+
+### Required Approvals Count
+
+For `approve_all` mode, you can require only **N out of M** approvals:
+
+```json
+{
+  "approvalMode": "approve_all",
+  "requiredApprovalsCount": 2,
+  "associations": [
+    { "associationValue": "user1@example.com" },
+    { "associationValue": "user2@example.com" },
+    { "associationValue": "user3@example.com" },
+    { "associationValue": "user4@example.com" }
+  ]
+}
+```
+
+The step completes when **any 2** of the 4 users approve.
+
+## Associations
+
+Associations define **who** can act on a step.
+
+```python
+# From workflow_schemas.py:16-24
+class WorkflowAssociationInput(BaseModel):
+    associationType: AssociationType  # "user" | "role" | "group" | "sql_rule"
+    associationValue: str = Field(min_length=1)
+    canApprove: bool = True
+    canReject: bool = True
+    canRevert: bool = True
+    priority: int | None = None
+    notificationOrder: int | None = None
+    escalationAfterSeconds: int | None = None
+```
+
+### Association Types
+
+<CodeGroup>
+```json User Association
+{
+  "associationType": "user",
+  "associationValue": "manager@example.com",
+  "priority": 1,
+  "notificationOrder": 1,
+  "escalationAfterSeconds": 86400,
+  "canApprove": true,
+  "canReject": true,
+  "canRevert": true
+}
+```
+
+```json Role Association
+{
+  "associationType": "role",
+  "associationValue": "finance_approver",
+  "priority": 2,
+  "canApprove": true,
+  "canReject": false,
+  "canRevert": false
+}
+```
+
+```json Group Association
+{
+  "associationType": "group",
+  "associationValue": "engineering_team",
+  "notificationOrder": 1,
+  "canApprove": true,
+  "canReject": true
+}
+```
+
+```json SQL Rule Association
+{
+  "associationType": "sql_rule",
+  "associationValue": "department_manager_rule",
+  "priority": 1,
+  "canApprove": true
+}
+```
+</CodeGroup>
+
+<Note>
+  **SQL rules** are evaluated dynamically at runtime to resolve the actual assignee. For example, a rule might query the database to find the requester's department manager.
+</Note>
+
+### Priority vs Notification Order
+
+| Field | Purpose | Used By |
+|-------|---------|----------|
+| `priority` | Escalation sequence | `priority_chain` mode |
+| `notificationOrder` | Notification sequence | `notify_all` mode |
+
+```json
+{
+  "associations": [
+    {
+      "associationValue": "manager@example.com",
+      "priority": 1,
+      "notificationOrder": 1,
+      "escalationAfterSeconds": 86400
+    },
+    {
+      "associationValue": "director@example.com",
+      "priority": 2,
+      "notificationOrder": 2,
+      "escalationAfterSeconds": 172800
+    }
+  ]
+}
+```
+
+## Notification Templates
+
+Configure in-app notifications sent when a step becomes actionable:
+
+```python
+# From workflow_schemas.py:36-39
+class WorkflowNotificationTemplateInput(BaseModel):
+    titleTemplate: str = ""
+    bodyTemplate: str = ""
+    allowActorOverride: bool = True
+```
+
+```json
+{
+  "notificationTemplate": {
+    "titleTemplate": "Approval needed: {stepLabel}",
+    "bodyTemplate": "{workflowName} is waiting for {actorEmail} on {stepCode}.",
+    "allowActorOverride": true
+  }
+}
+```
+
+### Supported Variables
+
+These variables are replaced at runtime (workflows.py:586-591):
+
+- `{workflowName}` - Workflow definition name
+- `{stepLabel}` - Step label
+- `{stepCode}` - Step code
+- `{actorEmail}` - Assignee email address
+
+### Allow Actor Override
+
+If `allowActorOverride: true`, the user can customize the notification message when taking an action.
+
+## Advanced Features
+
+### Form Schema
+
+Attach a JSON Schema to define dynamic forms for data capture:
+
+```json
+{
+  "stepCode": "collect_details",
+  "stepType": "human_task",
+  "formSchema": {
+    "type": "object",
+    "properties": {
+      "amount": { "type": "number", "minimum": 0 },
+      "description": { "type": "string", "maxLength": 500 },
+      "urgency": { "type": "string", "enum": ["low", "medium", "high"] }
+    },
+    "required": ["amount", "description"]
+  }
+}
+```
+
+<Note>
+  The builder UI doesn't currently provide a visual form schema editor. You must import JSON or manually edit the payload.
+</Note>
+
+### Config Field
+
+Store arbitrary step configuration:
+
+```json
+{
+  "stepCode": "auto_process",
+  "stepType": "system_task",
+  "config": {
+    "handlerClass": "AutoApprovalHandler",
+    "threshold": 5000,
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "backoffMs": 1000
+    }
+  }
+}
+```
+
+The `config` field is persisted as JSONB and can be read by the workflow engine.
+
+### Max Visits Per Instance
+
+Prevents infinite loops in cyclic workflows:
+
+```json
+{
+  "stepCode": "revision_loop",
+  "maxVisitsPerInstance": 3
+}
+```
+
+The workflow engine tracks how many times each instance has visited this step. If it exceeds `maxVisitsPerInstance`, the workflow fails.
+
+<Warning>
+  If you have a cycle in your workflow (e.g., a revert loop), **at least one step in the cycle** must have `maxVisitsPerInstance` set. Otherwise, validation will fail (workflows.py:167-174).
+</Warning>
+
+## Database Persistence
+
+Steps are persisted to `workflow_step_definition` (workflows.py:496-535):
+
+```sql
+INSERT INTO workflow_step_definition (
+    workflow_version_id,
+    step_code,
+    step_label,
+    description,
+    step_type,
+    sequence_hint,
+    allow_revert,
+    remark_required_on_approve,
+    remark_required_on_reject,
+    remark_required_on_revert,
+    max_visits_per_instance,
+    form_schema,
+    config,
+    is_terminal
+)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+RETURNING id
+```
+
+Related tables:
+- `workflow_step_assignment_policy` (workflows.py:538-560)
+- `workflow_step_association` (workflows.py:623-651)
+- `notification_template` (workflows.py:565-594)
+- `workflow_step_mapping` (subworkflows, workflows.py:596-621)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Transitions" icon="arrow-right" href="/builder/transitions">
+    Learn how to route between steps with actions and conditions
+  </Card>
+  <Card title="Validation" icon="check" href="/builder/validation">
+    Understand step validation rules and error messages
+  </Card>
+</CardGroup>

@@ -1,0 +1,245 @@
+---
+title: List My Tasks
+api: GET /api/v1/me/tasks
+---
+
+Retrieves all human tasks assigned to the authenticated user. Tasks are returned in descending order by creation time (most recent first).
+
+## Authentication
+
+Requires Bearer token authentication. Returns only tasks assigned to the authenticated user.
+
+## Response
+
+<ResponseField name="items" type="array">
+  Array of human tasks assigned to the current user.
+  
+  <ResponseField name="items[].id" type="UUID">
+    Unique identifier for the task.
+  </ResponseField>
+  
+  <ResponseField name="items[].workflowInstanceId" type="UUID">
+    The workflow instance this task belongs to.
+  </ResponseField>
+  
+  <ResponseField name="items[].stepInstanceId" type="UUID">
+    The step instance this task belongs to.
+  </ResponseField>
+  
+  <ResponseField name="items[].stepDefinitionId" type="UUID">
+    The step definition ID.
+  </ResponseField>
+  
+  <ResponseField name="items[].stepCode" type="string">
+    Code identifier for the step.
+  </ResponseField>
+  
+  <ResponseField name="items[].stepLabel" type="string">
+    Human-readable label for the step.
+  </ResponseField>
+  
+  <ResponseField name="items[].assignedUserId" type="string | null">
+    User ID if assigned to a specific user.
+  </ResponseField>
+  
+  <ResponseField name="items[].assignedRoleKey" type="string | null">
+    Role key if assigned by role.
+  </ResponseField>
+  
+  <ResponseField name="items[].assignedGroupKey" type="string | null">
+    Group key if assigned by group.
+  </ResponseField>
+  
+  <ResponseField name="items[].approvalModeSnapshot" type="string">
+    The approval mode for this task:
+    - `priority_chain` - Tasks are assigned sequentially by priority
+    - `approve_any_one` - Any single approval completes the step
+    - `approve_all` - All assignees must approve
+    - `notify_all` - All assignees are notified simultaneously
+  </ResponseField>
+  
+  <ResponseField name="items[].priorityRank" type="integer | null">
+    Priority rank of the task (lower numbers = higher priority).
+  </ResponseField>
+  
+  <ResponseField name="items[].sequenceNo" type="integer">
+    Sequence number in the approval chain.
+  </ResponseField>
+  
+  <ResponseField name="items[].status" type="string">
+    Task status:
+    - `queued` - Task is queued, waiting to become active
+    - `open` - Task is ready for action
+    - `claimed` - Task has been claimed by assignee
+    - `completed` - Task has been completed
+    - `expired` - Task has expired
+    - `cancelled` - Task has been cancelled
+  </ResponseField>
+  
+  <ResponseField name="items[].availableActions" type="array">
+    Array of action types available for this task (e.g., `["approve", "reject"]`).
+  </ResponseField>
+  
+  <ResponseField name="items[].dueAt" type="string | null">
+    ISO 8601 timestamp when the task is due (if set).
+  </ResponseField>
+  
+  <ResponseField name="items[].escalationDueAt" type="string | null">
+    ISO 8601 timestamp when the task will escalate (if queued).
+  </ResponseField>
+  
+  <ResponseField name="items[].createdAt" type="string">
+    ISO 8601 timestamp when the task was created.
+  </ResponseField>
+</ResponseField>
+
+## Example Request
+
+<CodeGroup>
+
+```bash cURL
+curl -X GET https://api.example.com/api/v1/me/tasks \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+```javascript JavaScript
+const response = await fetch('https://api.example.com/api/v1/me/tasks', {
+  headers: {
+    'Authorization': 'Bearer YOUR_TOKEN'
+  }
+});
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.get(
+    'https://api.example.com/api/v1/me/tasks',
+    headers={'Authorization': 'Bearer YOUR_TOKEN'}
+)
+
+data = response.json()
+```
+
+</CodeGroup>
+
+## Example Response
+
+```json
+{
+  "items": [
+    {
+      "id": "789e0123-e89b-12d3-a456-426614174444",
+      "workflowInstanceId": "123e4567-e89b-12d3-a456-426614174000",
+      "stepInstanceId": "456e7890-e12b-12d3-a456-426614174222",
+      "stepDefinitionId": "321e6543-e21b-12d3-a456-426614174333",
+      "stepCode": "manager_review",
+      "stepLabel": "Manager Review",
+      "assignedUserId": "user-123",
+      "assignedRoleKey": null,
+      "assignedGroupKey": null,
+      "approvalModeSnapshot": "priority_chain",
+      "priorityRank": 1,
+      "sequenceNo": 1,
+      "status": "open",
+      "availableActions": ["approve", "reject"],
+      "dueAt": "2024-03-15T10:30:00Z",
+      "escalationDueAt": null,
+      "createdAt": "2024-03-14T10:30:01Z"
+    },
+    {
+      "id": "890e1234-e89b-12d3-a456-426614174555",
+      "workflowInstanceId": "234e5678-e89b-12d3-a456-426614174001",
+      "stepInstanceId": "567e8901-e12b-12d3-a456-426614174223",
+      "stepDefinitionId": "432e7654-e21b-12d3-a456-426614174334",
+      "stepCode": "finance_approval",
+      "stepLabel": "Finance Approval",
+      "assignedUserId": null,
+      "assignedRoleKey": "finance_manager",
+      "assignedGroupKey": null,
+      "approvalModeSnapshot": "approve_any_one",
+      "priorityRank": null,
+      "sequenceNo": 1,
+      "status": "open",
+      "availableActions": ["approve", "reject", "revert"],
+      "dueAt": null,
+      "escalationDueAt": null,
+      "createdAt": "2024-03-14T09:15:00Z"
+    },
+    {
+      "id": "901e2345-e89b-12d3-a456-426614174666",
+      "workflowInstanceId": "345e6789-e89b-12d3-a456-426614174002",
+      "stepInstanceId": "678e9012-e12b-12d3-a456-426614174224",
+      "stepDefinitionId": "543e8765-e21b-12d3-a456-426614174335",
+      "stepCode": "compliance_check",
+      "stepLabel": "Compliance Check",
+      "assignedUserId": "user-123",
+      "assignedRoleKey": null,
+      "assignedGroupKey": null,
+      "approvalModeSnapshot": "approve_all",
+      "priorityRank": 2,
+      "sequenceNo": 2,
+      "status": "queued",
+      "availableActions": ["approve", "reject"],
+      "dueAt": null,
+      "escalationDueAt": "2024-03-15T09:15:00Z",
+      "createdAt": "2024-03-14T08:00:00Z"
+    }
+  ]
+}
+```
+
+## Status Codes
+
+<ResponseField name="200" type="OK">
+  Tasks retrieved successfully.
+</ResponseField>
+
+<ResponseField name="401" type="Unauthorized">
+  Missing or invalid authentication token.
+</ResponseField>
+
+## Use Cases
+
+### Filter Open Tasks
+
+Get tasks that are ready for action:
+
+```javascript
+const openTasks = data.items.filter(task => task.status === 'open');
+```
+
+### Filter by Workflow
+
+Get all tasks for a specific workflow instance:
+
+```javascript
+const workflowTasks = data.items.filter(task => 
+  task.workflowInstanceId === '123e4567-e89b-12d3-a456-426614174000'
+);
+```
+
+### Sort by Priority
+
+Sort tasks by priority rank (nulls last):
+
+```javascript
+const sortedTasks = data.items.sort((a, b) => {
+  if (a.priorityRank === null) return 1;
+  if (b.priorityRank === null) return -1;
+  return a.priorityRank - b.priorityRank;
+});
+```
+
+### Check for Overdue Tasks
+
+Find tasks past their due date:
+
+```javascript
+const now = new Date();
+const overdueTasks = data.items.filter(task => 
+  task.dueAt && new Date(task.dueAt) < now && task.status === 'open'
+);
+```

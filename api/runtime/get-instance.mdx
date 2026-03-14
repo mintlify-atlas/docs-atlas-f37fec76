@@ -1,0 +1,327 @@
+---
+title: Get Workflow Instance
+api: GET /api/v1/workflow-instances/{workflow_instance_id}
+---
+
+Retrieves detailed information about a specific workflow instance, including all steps, actions, and current state.
+
+## Authentication
+
+Requires Bearer token authentication.
+
+## Path Parameters
+
+<ParamField path="workflow_instance_id" type="UUID" required>
+  The unique identifier of the workflow instance to retrieve.
+</ParamField>
+
+## Response
+
+<ResponseField name="item" type="object">
+  The complete workflow instance details.
+  
+  <ResponseField name="item.id" type="UUID">
+    Unique identifier for the workflow instance.
+  </ResponseField>
+  
+  <ResponseField name="item.workflowDefinitionId" type="UUID">
+    The workflow definition this instance belongs to.
+  </ResponseField>
+  
+  <ResponseField name="item.workflowDefinitionKey" type="string">
+    The key of the workflow definition.
+  </ResponseField>
+  
+  <ResponseField name="item.workflowDefinitionName" type="string">
+    Human-readable name of the workflow.
+  </ResponseField>
+  
+  <ResponseField name="item.workflowVersionId" type="UUID">
+    The specific version of the workflow definition.
+  </ResponseField>
+  
+  <ResponseField name="item.businessKey" type="string | null">
+    Optional business identifier.
+  </ResponseField>
+  
+  <ResponseField name="item.runNumber" type="integer">
+    Sequential run number for this business key.
+  </ResponseField>
+  
+  <ResponseField name="item.status" type="string">
+    Current workflow status: `running`, `waiting`, `paused`, `completed`, `rejected`, `failed`, or `cancelled`.
+  </ResponseField>
+  
+  <ResponseField name="item.currentStepCode" type="string | null">
+    Code of the current step.
+  </ResponseField>
+  
+  <ResponseField name="item.currentStepLabel" type="string | null">
+    Label of the current step.
+  </ResponseField>
+  
+  <ResponseField name="item.startedBy" type="string">
+    User ID of the workflow initiator.
+  </ResponseField>
+  
+  <ResponseField name="item.startedAt" type="string">
+    ISO 8601 timestamp when the workflow started.
+  </ResponseField>
+  
+  <ResponseField name="item.completedAt" type="string | null">
+    ISO 8601 timestamp when completed (if applicable).
+  </ResponseField>
+  
+  <ResponseField name="item.inputData" type="object">
+    Original input data.
+  </ResponseField>
+  
+  <ResponseField name="item.contextData" type="object">
+    Current context data (may be modified during execution).
+  </ResponseField>
+  
+  <ResponseField name="item.outputData" type="object">
+    Final output data (populated on completion).
+  </ResponseField>
+  
+  <ResponseField name="item.graphJson" type="object">
+    The workflow graph structure.
+  </ResponseField>
+  
+  <ResponseField name="item.builderLayout" type="object">
+    Visual layout information.
+  </ResponseField>
+  
+  <ResponseField name="item.steps" type="array">
+    Array of all step instances executed in this workflow.
+    
+    <ResponseField name="item.steps[].id" type="UUID">
+      Step instance ID.
+    </ResponseField>
+    
+    <ResponseField name="item.steps[].stepCode" type="string">
+      Step code identifier.
+    </ResponseField>
+    
+    <ResponseField name="item.steps[].stepLabel" type="string">
+      Human-readable step label.
+    </ResponseField>
+    
+    <ResponseField name="item.steps[].stepType" type="string">
+      Type: `start`, `human_task`, `subworkflow`, `end`, etc.
+    </ResponseField>
+    
+    <ResponseField name="item.steps[].status" type="string">
+      Step status: `pending`, `active`, `waiting`, `completed`, `rejected`, `reverted`, `failed`, `cancelled`.
+    </ResponseField>
+    
+    <ResponseField name="item.steps[].visitCount" type="integer">
+      Number of times this step has been visited (for loops).
+    </ResponseField>
+    
+    <ResponseField name="item.steps[].enteredAt" type="string">
+      When the step was entered.
+    </ResponseField>
+    
+    <ResponseField name="item.steps[].completedAt" type="string | null">
+      When the step completed.
+    </ResponseField>
+    
+    <ResponseField name="item.steps[].waitingSince" type="string | null">
+      When the step started waiting (for human tasks).
+    </ResponseField>
+    
+    <ResponseField name="item.steps[].resultAction" type="string | null">
+      The action that completed this step.
+    </ResponseField>
+  </ResponseField>
+  
+  <ResponseField name="item.actions" type="array">
+    All actions performed on this workflow.
+    
+    <ResponseField name="item.actions[].id" type="UUID">
+      Action ID.
+    </ResponseField>
+    
+    <ResponseField name="item.actions[].actionType" type="string">
+      Type: `start`, `approve`, `reject`, `revert`, `custom`.
+    </ResponseField>
+    
+    <ResponseField name="item.actions[].actionCode" type="string | null">
+      Custom action code (for custom actions).
+    </ResponseField>
+    
+    <ResponseField name="item.actions[].actorUserId" type="string">
+      User who performed the action.
+    </ResponseField>
+    
+    <ResponseField name="item.actions[].actorType" type="string">
+      Actor type: `user` or `system`.
+    </ResponseField>
+    
+    <ResponseField name="item.actions[].remarkText" type="string | null">
+      Optional comment provided with the action.
+    </ResponseField>
+    
+    <ResponseField name="item.actions[].payload" type="object">
+      Action-specific payload data.
+    </ResponseField>
+    
+    <ResponseField name="item.actions[].createdAt" type="string">
+      When the action was performed.
+    </ResponseField>
+  </ResponseField>
+</ResponseField>
+
+## Example Request
+
+<CodeGroup>
+
+```bash cURL
+curl -X GET https://api.example.com/api/v1/workflow-instances/123e4567-e89b-12d3-a456-426614174000 \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+```javascript JavaScript
+const response = await fetch(
+  'https://api.example.com/api/v1/workflow-instances/123e4567-e89b-12d3-a456-426614174000',
+  {
+    headers: {
+      'Authorization': 'Bearer YOUR_TOKEN'
+    }
+  }
+);
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.get(
+    'https://api.example.com/api/v1/workflow-instances/123e4567-e89b-12d3-a456-426614174000',
+    headers={'Authorization': 'Bearer YOUR_TOKEN'}
+)
+
+data = response.json()
+```
+
+</CodeGroup>
+
+## Example Response
+
+```json
+{
+  "item": {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "workflowDefinitionId": "987e6543-e21b-12d3-a456-426614174999",
+    "workflowDefinitionKey": "expense-approval",
+    "workflowDefinitionName": "Expense Approval Workflow",
+    "workflowVersionId": "456e7890-e12b-12d3-a456-426614174111",
+    "businessKey": "EXP-2024-001",
+    "runNumber": 1,
+    "status": "completed",
+    "currentStepCode": "end",
+    "currentStepLabel": "End",
+    "startedBy": "user-123",
+    "startedAt": "2024-03-14T10:30:00Z",
+    "completedAt": "2024-03-14T11:45:00Z",
+    "inputData": {
+      "amount": 1500.00,
+      "currency": "USD",
+      "category": "travel"
+    },
+    "contextData": {
+      "amount": 1500.00,
+      "currency": "USD",
+      "category": "travel",
+      "approvedBy": "manager@company.com",
+      "approvalDate": "2024-03-14T11:45:00Z"
+    },
+    "outputData": {
+      "approvalStatus": "approved",
+      "approvedAmount": 1500.00,
+      "finalApprover": "manager@company.com"
+    },
+    "graphJson": {},
+    "builderLayout": {},
+    "steps": [
+      {
+        "id": "step-001",
+        "stepCode": "start",
+        "stepLabel": "Start",
+        "stepType": "start",
+        "status": "completed",
+        "visitCount": 1,
+        "enteredAt": "2024-03-14T10:30:00Z",
+        "completedAt": "2024-03-14T10:30:01Z",
+        "waitingSince": null,
+        "resultAction": "approve"
+      },
+      {
+        "id": "step-002",
+        "stepCode": "manager_review",
+        "stepLabel": "Manager Review",
+        "stepType": "human_task",
+        "status": "completed",
+        "visitCount": 1,
+        "enteredAt": "2024-03-14T10:30:01Z",
+        "completedAt": "2024-03-14T11:45:00Z",
+        "waitingSince": "2024-03-14T10:30:01Z",
+        "resultAction": "approve"
+      },
+      {
+        "id": "step-003",
+        "stepCode": "end",
+        "stepLabel": "End",
+        "stepType": "end",
+        "status": "completed",
+        "visitCount": 1,
+        "enteredAt": "2024-03-14T11:45:00Z",
+        "completedAt": "2024-03-14T11:45:00Z",
+        "waitingSince": null,
+        "resultAction": "approve"
+      }
+    ],
+    "actions": [
+      {
+        "id": "action-001",
+        "actionType": "start",
+        "actionCode": null,
+        "actorUserId": "user-123",
+        "actorType": "user",
+        "remarkText": null,
+        "payload": {
+          "workflowDefinitionKey": "expense-approval",
+          "businessKey": "EXP-2024-001"
+        },
+        "createdAt": "2024-03-14T10:30:00Z"
+      },
+      {
+        "id": "action-002",
+        "actionType": "approve",
+        "actionCode": null,
+        "actorUserId": "manager-456",
+        "actorType": "user",
+        "remarkText": "Approved - valid business expense",
+        "payload": {},
+        "createdAt": "2024-03-14T11:45:00Z"
+      }
+    ]
+  }
+}
+```
+
+## Status Codes
+
+<ResponseField name="200" type="OK">
+  Workflow instance retrieved successfully.
+</ResponseField>
+
+<ResponseField name="401" type="Unauthorized">
+  Missing or invalid authentication token.
+</ResponseField>
+
+<ResponseField name="404" type="Not Found">
+  Workflow instance not found.
+</ResponseField>

@@ -1,0 +1,268 @@
+---
+title: Reject Task
+api: POST /api/v1/human-tasks/{task_id}/reject
+---
+
+Rejects a human task. Depending on workflow configuration, this may terminate the workflow, send it to a different step, or escalate to the next approver in the chain.
+
+## Authentication
+
+Requires Bearer token authentication. The authenticated user must be assigned to the task.
+
+## Path Parameters
+
+<ParamField path="task_id" type="UUID" required>
+  The unique identifier of the task to reject.
+</ParamField>
+
+## Request Body
+
+<ParamField body="remark" type="string">
+  Optional comment explaining the rejection. Required if the step definition has `remarkRequiredOnReject` set to true.
+</ParamField>
+
+<ParamField body="payload" type="object" default="{}">
+  Optional additional data to include with the rejection. This data becomes available in the workflow context.
+</ParamField>
+
+<ParamField body="actionCode" type="string">
+  Optional custom action code. Not typically needed for reject actions.
+</ParamField>
+
+## Response
+
+<ResponseField name="workflowInstanceId" type="UUID">
+  The ID of the workflow instance.
+</ResponseField>
+
+<ResponseField name="stepInstanceId" type="UUID">
+  The ID of the step instance that was rejected.
+</ResponseField>
+
+<ResponseField name="actionType" type="string">
+  The type of action performed (`reject`).
+</ResponseField>
+
+<ResponseField name="workflowStatus" type="string">
+  The new status of the workflow after rejection:
+  - `rejected` - Workflow was terminated due to rejection
+  - `running` - Workflow advanced to a rejection handling step
+  - `waiting` - Still waiting (escalated to next approver in chain)
+</ResponseField>
+
+<ResponseField name="nextStepCode" type="string | null">
+  The code of the next step, or null if workflow was terminated.
+</ResponseField>
+
+## Example Request
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://api.example.com/api/v1/human-tasks/789e0123-e89b-12d3-a456-426614174444/reject \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "remark": "Expenses exceed policy limits for this category",
+    "payload": {
+      "rejectionReason": "policy_violation",
+      "details": "Travel budget exceeded by $500"
+    }
+  }'
+```
+
+```javascript JavaScript
+const response = await fetch(
+  'https://api.example.com/api/v1/human-tasks/789e0123-e89b-12d3-a456-426614174444/reject',
+  {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer YOUR_TOKEN',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      remark: 'Expenses exceed policy limits for this category',
+      payload: {
+        rejectionReason: 'policy_violation',
+        details: 'Travel budget exceeded by $500'
+      }
+    })
+  }
+);
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.post(
+    'https://api.example.com/api/v1/human-tasks/789e0123-e89b-12d3-a456-426614174444/reject',
+    headers={
+        'Authorization': 'Bearer YOUR_TOKEN',
+        'Content-Type': 'application/json'
+    },
+    json={
+        'remark': 'Expenses exceed policy limits for this category',
+        'payload': {
+            'rejectionReason': 'policy_violation',
+            'details': 'Travel budget exceeded by $500'
+        }
+    }
+)
+
+data = response.json()
+```
+
+</CodeGroup>
+
+## Example Response
+
+### Workflow Terminated
+
+```json
+{
+  "workflowInstanceId": "123e4567-e89b-12d3-a456-426614174000",
+  "stepInstanceId": "456e7890-e12b-12d3-a456-426614174222",
+  "actionType": "reject",
+  "workflowStatus": "rejected",
+  "nextStepCode": null
+}
+```
+
+### Workflow Advanced to Rejection Handler
+
+```json
+{
+  "workflowInstanceId": "123e4567-e89b-12d3-a456-426614174000",
+  "stepInstanceId": "456e7890-e12b-12d3-a456-426614174222",
+  "actionType": "reject",
+  "workflowStatus": "running",
+  "nextStepCode": "revision_required"
+}
+```
+
+### Escalated to Next Approver (Priority Chain)
+
+```json
+{
+  "workflowInstanceId": "123e4567-e89b-12d3-a456-426614174000",
+  "stepInstanceId": "456e7890-e12b-12d3-a456-426614174222",
+  "actionType": "reject",
+  "workflowStatus": "waiting",
+  "nextStepCode": null
+}
+```
+
+## Status Codes
+
+<ResponseField name="200" type="OK">
+  Task rejected successfully.
+</ResponseField>
+
+<ResponseField name="401" type="Unauthorized">
+  Missing or invalid authentication token.
+</ResponseField>
+
+<ResponseField name="403" type="Forbidden">
+  User is not assigned to this task.
+</ResponseField>
+
+<ResponseField name="404" type="Not Found">
+  Task not found.
+</ResponseField>
+
+<ResponseField name="409" type="Conflict">
+  Task is not in an actionable state (e.g., already completed or cancelled).
+</ResponseField>
+
+<ResponseField name="422" type="Unprocessable Entity">
+  Request validation failed:
+  - Missing required remark when `remarkRequiredOnReject` is true
+  - No matching transition exists for reject action
+</ResponseField>
+
+## Rejection Behavior by Approval Mode
+
+### Priority Chain
+
+In `priority_chain` mode, rejection escalates to the next approver:
+1. Current task is marked as completed with reject action
+2. Next task in the chain becomes `open`
+3. Workflow remains in `waiting` status
+4. Notification is sent to the next assignee
+5. If no more tasks in chain, workflow follows reject transition
+
+### Approve Any One
+
+In `approve_any_one` mode:
+1. If other tasks are still open, they remain actionable
+2. Rejection doesn't cancel other tasks
+3. Workflow continues waiting until one task is approved or all are rejected
+4. If all tasks reject, workflow follows reject transition
+
+### Approve All
+
+In `approve_all` mode:
+1. Single rejection cancels all other tasks
+2. Step is marked as rejected
+3. Workflow immediately follows reject transition or terminates
+
+## Rejection Handling
+
+### Workflow Transitions
+
+Workflows can define specific transitions for reject actions:
+- **No reject transition**: Workflow terminates with `rejected` status
+- **Reject to revision step**: Workflow routes to a step where requester can revise
+- **Reject to escalation**: Workflow routes to higher-level approval
+
+### Context Updates
+
+Rejection payload data is merged into workflow context:
+
+```json
+{
+  "payload": {
+    "rejectionReason": "insufficient_documentation",
+    "requiredDocuments": ["receipt", "approval_form"]
+  }
+}
+```
+
+This data is available to subsequent steps for handling the rejection.
+
+### Audit Trail
+
+All rejections are recorded in the workflow action history with:
+- Actor user ID
+- Timestamp
+- Remark text
+- Payload data
+
+## Common Use Cases
+
+### Rejection with Required Revision
+
+```json
+{
+  "remark": "Please provide detailed receipts",
+  "payload": {
+    "rejectionType": "missing_documentation",
+    "requiredActions": ["attach_receipts", "itemize_expenses"]
+  }
+}
+```
+
+### Policy Violation
+
+```json
+{
+  "remark": "Expense exceeds department budget limits",
+  "payload": {
+    "rejectionType": "policy_violation",
+    "violatedPolicy": "TRAVEL-001",
+    "budgetExceededBy": 500.00
+  }
+}
+```

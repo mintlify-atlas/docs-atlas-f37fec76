@@ -1,122 +1,127 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Workflow Engine Platform",
+  "theme": "palm",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#6366f1",
+    "light": "#818cf8",
+    "dark": "#4f46e5"
   },
   "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/whosensei/workflows"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/whosensei/workflows"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "architecture"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/workflows",
+              "concepts/steps",
+              "concepts/transitions",
+              "concepts/human-tasks",
+              "concepts/subworkflows",
+              "concepts/notifications"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Workflow Builder",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "builder/overview",
+              "builder/creating-workflows",
+              "builder/step-configuration",
+              "builder/transitions",
+              "builder/visual-editor",
+              "builder/validation"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Runtime Operations",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "runtime/starting-workflows",
+              "runtime/task-inbox",
+              "runtime/approvals",
+              "runtime/workflow-monitoring",
+              "runtime/history"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/setup",
+              "deployment/environment",
+              "deployment/database",
+              "deployment/workers"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Authentication",
             "pages": [
-              "api-reference/introduction"
+              "api/auth/overview",
+              "api/auth/me"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Workflow Definitions",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/workflows/create-definition",
+              "api/workflows/get-definition",
+              "api/workflows/list-definitions",
+              "api/workflows/create-version",
+              "api/workflows/publish"
+            ]
+          },
+          {
+            "group": "Workflow Runtime",
+            "pages": [
+              "api/runtime/create-instance",
+              "api/runtime/get-instance",
+              "api/runtime/get-history",
+              "api/runtime/list-tasks",
+              "api/runtime/approve",
+              "api/runtime/reject",
+              "api/runtime/revert"
+            ]
+          },
+          {
+            "group": "Notifications",
+            "pages": [
+              "api/notifications/list",
+              "api/notifications/mark-read"
+            ]
+          },
+          {
+            "group": "Real-time",
+            "pages": [
+              "api/realtime/sse"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

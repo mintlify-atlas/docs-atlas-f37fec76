@@ -1,0 +1,91 @@
+---
+title: "Introduction"
+description: "Build powerful async workflows with human-in-the-loop processing"
+---
+
+## Welcome to Workflow Engine Platform
+
+Workflow Engine Platform is a complete async workflow engine designed for complex business processes that require human approval, multi-step processing, and reliable execution over days or weeks.
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get up and running in minutes
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/architecture">
+    Understand the system design
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/auth/overview">
+    Explore the REST API
+  </Card>
+  <Card title="Deployment Guide" icon="server" href="/deployment/setup">
+    Deploy to production
+  </Card>
+</CardGroup>
+
+## Key Features
+
+<AccordionGroup>
+  <Accordion title="Visual Workflow Builder" icon="diagram-project">
+    Create workflows visually with React Flow. Define steps, transitions, and approval policies through an intuitive drag-and-drop interface.
+  </Accordion>
+  
+  <Accordion title="Human-in-the-Loop Processing" icon="user-check">
+    Build workflows that pause for human approval, rejection, or revert actions. Configure assignees, priorities, and escalation policies.
+  </Accordion>
+  
+  <Accordion title="Priority Chain & Multi-Assignee Support" icon="users">
+    Notify users by priority order, all at once, or require approval from everyone. Escalate to the next assignee after timeout.
+  </Accordion>
+  
+  <Accordion title="Subworkflow Mapping" icon="diagram-nested">
+    Trigger child workflows from parent steps. The parent pauses until the child completes, then resumes with mapped outputs.
+  </Accordion>
+  
+  <Accordion title="Real-time Notifications" icon="bell">
+    Task inbox with in-app notifications. Users receive notifications only when workflows reach waiting steps.
+  </Accordion>
+  
+  <Accordion title="Comprehensive Audit History" icon="clock-rotate-left">
+    Every state change, action, and notification is persisted. View complete workflow history and action logs.
+  </Accordion>
+</AccordionGroup>
+
+## Technology Stack
+
+The platform is built on modern, reliable technologies:
+
+- **Frontend**: Next.js 16 with shadcn/ui components
+- **Backend**: FastAPI with Python
+- **Database**: PostgreSQL (Neon) as the source of truth
+- **Queue**: RabbitMQ for async task processing
+- **Authentication**: Better Auth with email/password and JWT
+- **Package Management**: pnpm for Node.js, uv for Python
+
+## Use Cases
+
+Workflow Engine Platform is ideal for:
+
+- **Approval Workflows**: Invoice approval, purchase requisitions, expense reports
+- **Review Processes**: Document review, code review, content moderation
+- **Multi-Stage Operations**: Onboarding flows, release pipelines, compliance checks
+- **Long-Running Processes**: Workflows that span days or weeks with multiple stakeholders
+
+## Next Steps
+
+<Steps>
+  <Step title="Quick Start">
+    Follow the [quickstart guide](/quickstart) to set up your local environment and create your first workflow.
+  </Step>
+  
+  <Step title="Learn Core Concepts">
+    Understand [workflows](/concepts/workflows), [steps](/concepts/steps), and [transitions](/concepts/transitions).
+  </Step>
+  
+  <Step title="Build Workflows">
+    Use the [workflow builder](/builder/overview) to create your first approval process.
+  </Step>
+  
+  <Step title="Deploy">
+    Follow the [deployment guide](/deployment/setup) to run in production.
+  </Step>
+</Steps>

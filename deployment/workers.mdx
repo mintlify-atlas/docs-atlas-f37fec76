@@ -1,0 +1,718 @@
+---
+title: 'Worker Deployment'
+description: 'Deploy and manage background workers for event processing and task escalation'
+---
+
+## Overview
+
+The Workflow Engine Platform uses two critical background workers to handle asynchronous operations:
+
+<CardGroup cols={2}>
+  <Card title="Outbox Worker" icon="paper-plane">
+    Publishes workflow events from the database to RabbitMQ using the transactional outbox pattern.
+  </Card>
+  
+  <Card title="Priority Release Worker" icon="clock">
+    Escalates priority chain tasks when assignees don't respond within the configured timeout.
+  </Card>
+</CardGroup>
+
+<Warning>
+  Both workers are **required** for the platform to function correctly. Without them:
+  - Events won't be published to RabbitMQ
+  - Priority chain escalations won't occur
+  - Notifications may not be sent
+</Warning>
+
+## Outbox Worker
+
+### Purpose
+
+The outbox worker implements the [Transactional Outbox Pattern](https://microservices.io/patterns/data/transactional-outbox.html) to ensure reliable event publishing:
+
+1. Application writes events to `outbox_event` table in same transaction as business data
+2. Worker polls the table for unpublished events
+3. Events are published to RabbitMQ exchange
+4. Successfully published events are marked as `published`
+5. Failed events retry with exponential backoff
+
+### Implementation
+
+Source: `apps/api/src/api/outbox_worker.py`
+
+**Key features:**
+- Batch processing for efficiency
+- Optimistic locking with `FOR UPDATE SKIP LOCKED`
+- Exponential backoff retry strategy
+- Dead letter queue for exhausted events
+- Worker identification for debugging
+
+### Configuration
+
+Configure via environment variables in `apps/api/.env`:
+
+<ParamField path="OUTBOX_BATCH_SIZE" type="integer" default="100">
+  Maximum events to process per iteration.
+  
+  **Tuning:**
+  - Higher values = better throughput, more memory
+  - Lower values = lower latency, less resource usage
+</ParamField>
+
+<ParamField path="OUTBOX_POLL_INTERVAL_SECONDS" type="float" default="0.5">
+  Seconds to wait between database polls when no events found.
+  
+  **Tuning:**
+  - Lower values = faster event processing, more DB load
+  - Higher values = reduced DB queries, higher latency
+</ParamField>
+
+<ParamField path="OUTBOX_CLAIM_TTL_SECONDS" type="integer" default="60">
+  Seconds before a claimed event can be reclaimed by another worker.
+  
+  Prevents events from being stuck if a worker crashes during processing.
+</ParamField>
+
+<ParamField path="OUTBOX_MAX_ATTEMPTS_DEFAULT" type="integer" default="20">
+  Default retry limit before moving events to dead letter queue.
+  
+  Can be overridden per-event via the `max_attempts` column.
+</ParamField>
+
+### Deployment Options
+
+<Tabs>
+  <Tab title="Docker Compose (Recommended)">
+    Deploy using the provided Docker Compose configuration:
+    
+    ```bash
+    # Start outbox worker only
+    docker compose -f infra/docker-compose.yml --profile workers up -d outbox-worker
+    
+    # Start all workers
+    pnpm workers:up
+    ```
+    
+    **Configuration** (`infra/docker-compose.yml`):
+    ```yaml
+    outbox-worker:
+      build:
+        context: ../apps/api
+        dockerfile: Dockerfile
+      depends_on:
+        rabbitmq:
+          condition: service_healthy
+      env_file:
+        - ../apps/api/.env
+      command: ["uv", "run", "--no-sync", "python", "scripts/outbox_worker.py"]
+      restart: unless-stopped
+      profiles: ["workers"]
+    ```
+    
+    **View logs:**
+    ```bash
+    docker logs -f outbox-worker
+    ```
+  </Tab>
+  
+  <Tab title="Manual Process">
+    Run the worker as a standalone process:
+    
+    ```bash
+    pnpm worker:outbox
+    ```
+    
+    Or directly with uv:
+    ```bash
+    cd apps/api
+    uv run python scripts/outbox_worker.py
+    ```
+    
+    **Use a process manager for production:**
+    - systemd (Linux)
+    - PM2 (Node.js ecosystem)
+    - Supervisor (Python ecosystem)
+  </Tab>
+  
+  <Tab title="Kubernetes">
+    Deploy as a Deployment with appropriate resource limits:
+    
+    ```yaml
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: outbox-worker
+    spec:
+      replicas: 2  # Scale based on load
+      selector:
+        matchLabels:
+          app: outbox-worker
+      template:
+        metadata:
+          labels:
+            app: outbox-worker
+        spec:
+          containers:
+          - name: worker
+            image: your-registry/workflow-api:latest
+            command: ["uv", "run", "--no-sync", "python", "scripts/outbox_worker.py"]
+            envFrom:
+            - secretRef:
+                name: workflow-api-env
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "100m"
+              limits:
+                memory: "512Mi"
+                cpu: "500m"
+    ```
+  </Tab>
+  
+  <Tab title="One-off Execution">
+    Process a single batch (useful for testing or cron jobs):
+    
+    ```bash
+    pnpm queue:publish
+    ```
+    
+    This runs `apps/api/scripts/publish_outbox.py` which calls `run_once()`.
+  </Tab>
+</Tabs>
+
+### Monitoring
+
+Track outbox worker health:
+
+<CodeGroup>
+```sql Event Status
+SELECT 
+  status, 
+  COUNT(*) as count,
+  MIN(available_at) as oldest_available,
+  MAX(retry_count) as max_retries
+FROM outbox_event
+GROUP BY status;
+```
+
+```sql Processing Lag
+SELECT 
+  event_type,
+  COUNT(*) as pending_count,
+  MIN(created_at) as oldest_event,
+  EXTRACT(EPOCH FROM (now() - MIN(created_at))) as lag_seconds
+FROM outbox_event
+WHERE status IN ('pending', 'retry_scheduled')
+GROUP BY event_type
+ORDER BY lag_seconds DESC;
+```
+
+```sql Dead Letters
+SELECT 
+  id,
+  event_type,
+  aggregate_type,
+  retry_count,
+  last_error,
+  created_at
+FROM outbox_event
+WHERE status = 'dead_letter'
+ORDER BY created_at DESC
+LIMIT 20;
+```
+</CodeGroup>
+
+## Priority Release Worker
+
+### Purpose
+
+Manages priority chain escalation for approval workflows:
+
+1. Finds tasks in `queued` status with `escalation_due_at` in the past
+2. Marks current assignee's task as `expired`
+3. Opens the next assignee's task in the priority chain
+4. Creates escalation notifications
+5. Publishes `human_task.escalated` events
+
+### Implementation
+
+Source: `apps/api/src/api/priority_release_worker.py`
+
+**Key features:**
+- PostgreSQL advisory locks prevent concurrent processing
+- Batch processing for efficiency
+- Atomic state transitions with `RETURNING` clause
+- Notification creation for affected users
+- Realtime event broadcasting
+
+### Configuration
+
+<ParamField path="PRIORITY_RELEASE_BATCH_SIZE" type="integer" default="100">
+  Maximum tasks to escalate per iteration.
+</ParamField>
+
+<ParamField path="PRIORITY_RELEASE_POLL_INTERVAL_SECONDS" type="integer" default="5">
+  Seconds between database polls.
+  
+  **Note:** This worker typically runs less frequently than the outbox worker since escalations are time-based (minutes/hours).
+</ParamField>
+
+<ParamField path="PRIORITY_RELEASE_ADVISORY_LOCK_ID" type="integer" default="54001">
+  PostgreSQL advisory lock ID.
+  
+  <Warning>
+    Change this if you use advisory locks elsewhere in your database to avoid conflicts.
+  </Warning>
+</ParamField>
+
+### Deployment Options
+
+<Tabs>
+  <Tab title="Docker Compose (Recommended)">
+    ```bash
+    # Start priority worker only
+    docker compose -f infra/docker-compose.yml --profile workers up -d priority-worker
+    
+    # Start all workers
+    pnpm workers:up
+    ```
+    
+    **Configuration** (`infra/docker-compose.yml`):
+    ```yaml
+    priority-worker:
+      build:
+        context: ../apps/api
+        dockerfile: Dockerfile
+      env_file:
+        - ../apps/api/.env
+      command: ["uv", "run", "--no-sync", "python", "scripts/priority_release_worker.py"]
+      restart: unless-stopped
+      profiles: ["workers"]
+    ```
+    
+    **View logs:**
+    ```bash
+    docker logs -f priority-worker
+    ```
+  </Tab>
+  
+  <Tab title="Manual Process">
+    ```bash
+    pnpm worker:priority
+    ```
+    
+    Or with uv:
+    ```bash
+    cd apps/api
+    uv run python scripts/priority_release_worker.py
+    ```
+  </Tab>
+  
+  <Tab title="Kubernetes">
+    ```yaml
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: priority-worker
+    spec:
+      replicas: 1  # Single instance due to advisory lock
+      selector:
+        matchLabels:
+          app: priority-worker
+      template:
+        metadata:
+          labels:
+            app: priority-worker
+        spec:
+          containers:
+          - name: worker
+            image: your-registry/workflow-api:latest
+            command: ["uv", "run", "--no-sync", "python", "scripts/priority_release_worker.py"]
+            envFrom:
+            - secretRef:
+                name: workflow-api-env
+            resources:
+              requests:
+                memory: "128Mi"
+                cpu: "50m"
+              limits:
+                memory: "256Mi"
+                cpu: "200m"
+    ```
+    
+    <Note>
+      Only run **one replica** - the advisory lock ensures only one worker processes at a time.
+    </Note>
+  </Tab>
+  
+  <Tab title="One-off Execution">
+    ```bash
+    pnpm queue:release
+    ```
+    
+    Useful for testing or manual escalation triggers.
+  </Tab>
+</Tabs>
+
+### Monitoring
+
+<CodeGroup>
+```sql Pending Escalations
+SELECT 
+  COUNT(*) as tasks_awaiting_escalation,
+  MIN(escalation_due_at) as next_escalation,
+  MAX(escalation_due_at) as furthest_escalation
+FROM human_task
+WHERE status = 'queued'
+  AND approval_mode_snapshot = 'priority_chain'
+  AND escalation_due_at IS NOT NULL
+  AND escalation_due_at <= now();
+```
+
+```sql Recent Escalations
+SELECT 
+  ht.id,
+  ht.step_instance_id,
+  wi.id as workflow_instance_id,
+  wd.name as workflow_name,
+  sd.step_label,
+  ht.assigned_user_id,
+  ht.sequence_no,
+  ht.due_at
+FROM human_task ht
+JOIN step_instance si ON si.id = ht.step_instance_id
+JOIN workflow_instance wi ON wi.id = ht.workflow_instance_id
+JOIN workflow_definition_version wdv ON wdv.id = wi.workflow_version_id
+JOIN workflow_definition wd ON wd.id = wdv.workflow_definition_id
+JOIN workflow_step_definition sd ON sd.id = ht.step_definition_id
+WHERE ht.status = 'open'
+  AND ht.due_at > now() - interval '5 minutes'
+ORDER BY ht.due_at DESC
+LIMIT 20;
+```
+</CodeGroup>
+
+## Worker Management
+
+### Starting Workers
+
+<CodeGroup>
+```bash All Workers
+# Using pnpm script
+pnpm workers:up
+
+# Direct docker compose
+docker compose -f infra/docker-compose.yml --profile workers up -d
+```
+
+```bash Individual Workers
+# Outbox worker only
+docker compose -f infra/docker-compose.yml up -d outbox-worker
+
+# Priority worker only
+docker compose -f infra/docker-compose.yml up -d priority-worker
+```
+</CodeGroup>
+
+### Stopping Workers
+
+<CodeGroup>
+```bash All Workers
+# Graceful shutdown
+pnpm workers:down
+
+# Force stop
+docker compose -f infra/docker-compose.yml --profile workers down
+```
+
+```bash Individual Workers
+docker stop outbox-worker
+docker stop priority-worker
+```
+</CodeGroup>
+
+### Viewing Logs
+
+<CodeGroup>
+```bash Follow Logs
+# All workers
+docker compose -f infra/docker-compose.yml logs -f
+
+# Specific worker
+docker logs -f outbox-worker
+docker logs -f priority-worker
+```
+
+```bash Recent Logs
+# Last 100 lines
+docker logs --tail 100 outbox-worker
+
+# With timestamps
+docker logs -t outbox-worker
+```
+</CodeGroup>
+
+### Restarting Workers
+
+```bash
+# Restart all workers
+docker compose -f infra/docker-compose.yml --profile workers restart
+
+# Restart specific worker
+docker restart outbox-worker
+```
+
+## Scaling Considerations
+
+### Outbox Worker Scaling
+
+<AccordionGroup>
+  <Accordion title="Horizontal Scaling">
+    You can run **multiple outbox workers** simultaneously:
+    
+    - Each worker processes a different batch (via `SKIP LOCKED`)
+    - No coordination required
+    - Scale based on event throughput
+    
+    **Example (Docker Compose):**
+    ```bash
+    docker compose -f infra/docker-compose.yml up -d --scale outbox-worker=3
+    ```
+    
+    **Example (Kubernetes):**
+    ```yaml
+    spec:
+      replicas: 5  # Adjust based on load
+    ```
+  </Accordion>
+  
+  <Accordion title="Vertical Scaling">
+    Increase batch size and reduce poll interval:
+    
+    ```bash
+    OUTBOX_BATCH_SIZE=500
+    OUTBOX_POLL_INTERVAL_SECONDS=0.1
+    ```
+    
+    Monitor database CPU and memory usage.
+  </Accordion>
+  
+  <Accordion title="When to Scale">
+    Scale up when:
+    - Outbox backlog grows consistently
+    - Event lag exceeds acceptable latency
+    - Worker CPU usage is consistently high
+    
+    Monitor with:
+    ```sql
+    SELECT COUNT(*) FROM outbox_event 
+    WHERE status IN ('pending', 'retry_scheduled');
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Priority Worker Scaling
+
+<Warning>
+  Only run **ONE** priority worker instance due to advisory lock usage.
+</Warning>
+
+The advisory lock ensures only one worker processes escalations at a time, preventing:
+- Duplicate escalations
+- Race conditions
+- Inconsistent state
+
+If you need higher throughput:
+- Increase `PRIORITY_RELEASE_BATCH_SIZE`
+- Decrease `PRIORITY_RELEASE_POLL_INTERVAL_SECONDS`
+- Optimize escalation queries
+
+## Production Best Practices
+
+<AccordionGroup>
+  <Accordion title="Health Checks">
+    Implement health monitoring:
+    
+    **Outbox Worker:**
+    - Alert if event backlog exceeds threshold
+    - Monitor dead letter queue growth
+    - Track worker uptime and restarts
+    
+    **Priority Worker:**
+    - Alert if escalations are delayed
+    - Monitor lock acquisition failures
+    - Track escalation processing time
+  </Accordion>
+  
+  <Accordion title="Graceful Shutdown">
+    Workers handle SIGTERM and SIGINT signals:
+    
+    ```python
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+    ```
+    
+    This allows:
+    - Finishing current batch
+    - Closing RabbitMQ connections
+    - Releasing database locks
+    
+    **Kubernetes:**
+    Set `terminationGracePeriodSeconds: 30` in pod spec.
+  </Accordion>
+  
+  <Accordion title="Resource Limits">
+    Set appropriate limits to prevent resource exhaustion:
+    
+    **Docker Compose:**
+    ```yaml
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    ```
+    
+    **Kubernetes:**
+    ```yaml
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+    ```
+  </Accordion>
+  
+  <Accordion title="Error Handling">
+    Workers implement robust error handling:
+    
+    - Database errors: Close connections and retry
+    - RabbitMQ errors: Reconnect with backoff
+    - Event processing errors: Mark for retry with exponential backoff
+    - Unrecoverable errors: Move to dead letter queue
+    
+    Configure monitoring to alert on:
+    - High retry counts
+    - Growing dead letter queue
+    - Repeated worker crashes
+  </Accordion>
+  
+  <Accordion title="Monitoring and Alerting">
+    Key metrics to track:
+    
+    | Metric | Warning Threshold | Critical Threshold |
+    |--------|-------------------|--------------------|
+    | Outbox backlog | > 1000 events | > 10000 events |
+    | Event lag | > 5 minutes | > 30 minutes |
+    | Dead letters/hour | > 10 | > 100 |
+    | Worker uptime | < 95% | < 90% |
+    | Pending escalations | > 50 | > 200 |
+    
+    Integrate with:
+    - Prometheus + Grafana
+    - Datadog
+    - New Relic
+    - CloudWatch (AWS)
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Worker Won't Start">
+    **Check dependencies:**
+    ```bash
+    # Verify RabbitMQ is running
+    docker ps | grep rabbitmq
+    
+    # Test database connection
+    psql $WORKFLOW_DATABASE_URL -c "SELECT 1;"
+    
+    # Check environment file
+    cat apps/api/.env
+    ```
+    
+    **View detailed errors:**
+    ```bash
+    docker logs outbox-worker
+    docker logs priority-worker
+    ```
+  </Accordion>
+  
+  <Accordion title="Events Not Publishing">
+    1. **Verify RabbitMQ connectivity:**
+       ```bash
+       # Check management UI
+       curl -u workflow:workflow http://localhost:15672/api/overview
+       ```
+    
+    2. **Check event status:**
+       ```sql
+       SELECT status, COUNT(*) FROM outbox_event GROUP BY status;
+       ```
+    
+    3. **Look for errors:**
+       ```sql
+       SELECT id, event_type, last_error 
+       FROM outbox_event 
+       WHERE last_error IS NOT NULL 
+       ORDER BY last_error_at DESC LIMIT 10;
+       ```
+    
+    4. **Verify exchange exists:**
+       ```bash
+       curl -u workflow:workflow \
+         http://localhost:15672/api/exchanges/%2F/workflow.events
+       ```
+  </Accordion>
+  
+  <Accordion title="Escalations Not Triggering">
+    1. **Check for overdue tasks:**
+       ```sql
+       SELECT COUNT(*) FROM human_task
+       WHERE status = 'queued'
+         AND escalation_due_at IS NOT NULL
+         AND escalation_due_at < now();
+       ```
+    
+    2. **Verify worker is running:**
+       ```bash
+       docker ps | grep priority-worker
+       docker logs priority-worker
+       ```
+    
+    3. **Check advisory lock:**
+       ```sql
+       SELECT * FROM pg_locks WHERE locktype = 'advisory';
+       ```
+    
+    4. **Test manual release:**
+       ```bash
+       pnpm queue:release
+       ```
+  </Accordion>
+  
+  <Accordion title="High CPU Usage">
+    - Reduce poll frequency (increase `*_POLL_INTERVAL_SECONDS`)
+    - Decrease batch sizes
+    - Check for inefficient queries (review `EXPLAIN ANALYZE`)
+    - Scale horizontally (outbox worker only)
+  </Accordion>
+  
+  <Accordion title="Memory Leaks">
+    Workers should have stable memory usage. If memory grows:
+    
+    1. Monitor with `docker stats`
+    2. Reduce `OUTBOX_BATCH_SIZE`
+    3. Check for unclosed connections
+    4. Implement automatic restarts:
+       ```yaml
+       restart: unless-stopped
+       ```
+  </Accordion>
+</AccordionGroup>

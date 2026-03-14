@@ -1,0 +1,603 @@
+---
+title: Human Tasks
+description: Understanding human task creation, assignment, and approval workflows
+---
+
+## Overview
+
+Human tasks represent actionable work items created when a workflow reaches a `human_task` step. Tasks are assigned to users based on associations and governed by approval policies.
+
+## Human Task Schema
+
+### Database Schema
+
+```sql
+CREATE TABLE human_task (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    workflow_instance_id uuid NOT NULL REFERENCES workflow_instance(id),
+    step_instance_id uuid NOT NULL REFERENCES step_instance(id),
+    step_definition_id uuid NOT NULL REFERENCES workflow_step_definition(id),
+    assigned_user_id text REFERENCES "user"(id),
+    assigned_role_key text,
+    assigned_group_key text,
+    approval_mode_snapshot text NOT NULL DEFAULT 'priority_chain',
+    priority_rank integer,
+    sequence_no integer NOT NULL DEFAULT 1,
+    status text NOT NULL DEFAULT 'open',
+    available_actions jsonb NOT NULL DEFAULT '[]'::jsonb,
+    due_at timestamptz,
+    escalation_due_at timestamptz,
+    claimed_at timestamptz,
+    completed_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+### Pydantic Response Model
+
+```python
+class HumanTaskResponse(BaseModel):
+    id: UUID
+    workflowInstanceId: UUID
+    stepInstanceId: UUID
+    stepDefinitionId: UUID
+    stepCode: str
+    stepLabel: str
+    assignedUserId: str | None = None
+    assignedRoleKey: str | None = None
+    assignedGroupKey: str | None = None
+    approvalModeSnapshot: str
+    priorityRank: int | None = None
+    sequenceNo: int
+    status: str
+    availableActions: list[str]
+    dueAt: str | None = None
+    escalationDueAt: str | None = None
+    createdAt: str
+```
+
+## Task Status Lifecycle
+
+```python
+TaskStatus = Literal[
+    "queued",     # Waiting for higher priority tasks
+    "open",       # Ready for action
+    "claimed",    # User has claimed (reserved for future use)
+    "completed",  # Action taken
+    "expired",    # Deadline passed (reserved for future use)
+    "cancelled"   # Step completed by another task
+]
+```
+
+<Steps>
+  <Step title="queued">
+    Task created but waiting for higher priority tasks to complete or timeout (used in `priority_chain` mode)
+  </Step>
+  
+  <Step title="open">
+    Task is ready for user action. User can approve, reject, revert, or take custom actions.
+  </Step>
+  
+  <Step title="claimed">
+    User has indicated intent to work on the task (reserved for future optimistic locking)
+  </Step>
+  
+  <Step title="completed">
+    User successfully took action on the task
+  </Step>
+  
+  <Step title="cancelled">
+    Task was cancelled because another assignee completed the step
+  </Step>
+</Steps>
+
+## Task Creation
+
+When a workflow enters a `human_task` step, the engine creates tasks based on the step's associations and policy.
+
+### Creation Logic
+
+Implemented in `runtime.py:363-542`:
+
+```python
+def _create_human_tasks(cursor, workflow_instance, step_instance, step_definition):
+    # Load assignment policy
+    cursor.execute(
+        """SELECT * FROM workflow_step_assignment_policy
+           WHERE step_definition_id = %s""",
+        (step_definition["id"],)
+    )
+    policy = cursor.fetchone()
+
+    # Load associations (who can act on this step)
+    cursor.execute(
+        """SELECT * FROM workflow_step_association
+           WHERE step_definition_id = %s AND is_active = true
+           ORDER BY notification_order NULLS LAST, priority NULLS LAST, created_at""",
+        (step_definition["id"],)
+    )
+    associations = cursor.fetchall()
+
+    # Resolve associations to actual user IDs
+    resolved_assignees = _resolve_task_assignees(cursor, associations)
+    
+    # Determine available actions
+    available_actions = _available_actions(
+        cursor,
+        workflow_instance["workflow_version_id"],
+        step_definition["id"],
+        step_definition["allow_revert"],
+    )
+    
+    approval_mode = policy["approval_mode"] if policy else "priority_chain"
+    reminder_seconds = policy["reminder_interval_seconds"] if policy else None
+```
+
+### Task Status Assignment
+
+Tasks are created as `open` or `queued` based on approval mode:
+
+```python
+for index, assignee in enumerate(resolved_assignees):
+    task_status = (
+        "open"
+        if approval_mode in {"approve_any_one", "approve_all", "notify_all"} or index == 0
+        else "queued"
+    )
+    
+    escalation_due_at = None
+    if task_status == "queued":
+        timeout_seconds = (
+            assignee["escalation_after_seconds"]
+            or (policy["escalation_timeout_seconds"] if policy else None)
+            or 86400
+        )
+        escalation_due_at = now + timedelta(seconds=timeout_seconds * index)
+```
+
+<Note>
+In `priority_chain` mode, only the first task is `open`. Subsequent tasks are `queued` with `escalation_due_at` timestamps.
+</Note>
+
+## Assignment Resolution
+
+Associations define who can act on a step. They are resolved to actual user assignments at task creation time.
+
+### Resolution Logic
+
+```python
+# From runtime.py:305-361
+def _resolve_task_assignees(cursor, associations):
+    resolved = []
+    for association in associations:
+        if association["association_type"] == "user":
+            value = association["association_value"]
+            if "@" in value:
+                # Resolve email to user ID
+                cursor.execute(
+                    'SELECT id, email FROM "user" WHERE email = %s',
+                    (value,)
+                )
+                user_row = cursor.fetchone()
+                if user_row is None:
+                    continue
+                resolved.append({
+                    "assigned_user_id": user_row["id"],
+                    "assigned_role_key": None,
+                    "assigned_group_key": None,
+                    "priority": association["priority"],
+                    "notification_order": association["notification_order"],
+                    "escalation_after_seconds": association["escalation_after_seconds"],
+                })
+            else:
+                resolved.append({
+                    "assigned_user_id": value,
+                    "assigned_role_key": None,
+                    "assigned_group_key": None,
+                    "priority": association["priority"],
+                    "notification_order": association["notification_order"],
+                    "escalation_after_seconds": association["escalation_after_seconds"],
+                })
+        elif association["association_type"] == "role":
+            resolved.append({
+                "assigned_user_id": None,
+                "assigned_role_key": association["association_value"],
+                "assigned_group_key": None,
+                "priority": association["priority"],
+                "notification_order": association["notification_order"],
+                "escalation_after_seconds": association["escalation_after_seconds"],
+            })
+        elif association["association_type"] == "group":
+            resolved.append({
+                "assigned_user_id": None,
+                "assigned_role_key": None,
+                "assigned_group_key": association["association_value"],
+                "priority": association["priority"],
+                "notification_order": association["notification_order"],
+                "escalation_after_seconds": association["escalation_after_seconds"],
+            })
+    return resolved
+```
+
+## Approval Modes
+
+The approval mode determines how tasks are distributed and how many approvals are required.
+
+### priority_chain
+
+**Behavior**: Tasks are created in sequence. Only the highest priority assignee receives an open task initially. When they complete it or timeout, the next assignee's task opens.
+
+**Implementation** (`runtime.py:1379-1441`):
+
+```python
+elif approval_mode == "priority_chain":
+    if action_type == "reject":
+        cursor.execute(
+            """SELECT * FROM human_task
+               WHERE step_instance_id = %s AND status = 'queued' AND sequence_no > %s
+               ORDER BY sequence_no ASC LIMIT 1""",
+            (task_row["step_instance_id"], task_row["sequence_no"])
+        )
+        next_task = cursor.fetchone()
+        if next_task:
+            advance = False
+            cursor.execute(
+                "UPDATE human_task SET status = 'open' WHERE id = %s",
+                (next_task["id"],)
+            )
+            # Notify next assignee...
+```
+
+**Use case**: Sequential approval chain (employee → manager → director)
+
+### approve_any_one
+
+**Behavior**: All assignees receive open tasks. The first one to approve completes the step. Remaining tasks are cancelled.
+
+**Implementation** (`runtime.py:1365-1377`):
+
+```python
+elif approval_mode == "approve_any_one":
+    if action_type == "reject":
+        cursor.execute(
+            """SELECT COUNT(*) AS remaining FROM human_task
+               WHERE step_instance_id = %s AND status IN ('open', 'queued', 'claimed') AND id <> %s""",
+            (task_row["step_instance_id"], task_row["id"])
+        )
+        remaining = cursor.fetchone()["remaining"]
+        if remaining > 0:
+            advance = False
+```
+
+**Use case**: Support ticket routing (any team member can claim)
+
+### approve_all
+
+**Behavior**: All assignees receive open tasks. Every assignee must approve before the step completes.
+
+**Implementation** (`runtime.py:1343-1363`):
+
+```python
+if approval_mode == "approve_all":
+    if action_type == "approve":
+        cursor.execute(
+            """SELECT COUNT(*) AS remaining FROM human_task
+               WHERE step_instance_id = %s AND status IN ('open', 'queued', 'claimed') AND id <> %s""",
+            (task_row["step_instance_id"], task_row["id"])
+        )
+        remaining = cursor.fetchone()["remaining"]
+        if remaining > 0:
+            advance = False
+            cursor.execute(
+                """UPDATE step_instance SET result_action = 'approve' WHERE id = %s""",
+                (task_row["step_instance_id"],)
+            )
+```
+
+**Use case**: Multi-signature approval (legal + compliance both must approve)
+
+### notify_all
+
+**Behavior**: All assignees are notified. The policy's `required_approvals_count` determines how many approvals are needed.
+
+**Use case**: Quorum voting (3 of 5 board members must approve)
+
+## Taking Action on Tasks
+
+Users interact with tasks through the task action API.
+
+### Action Request
+
+```python
+class WorkflowTaskActionRequest(BaseModel):
+    actionType: TaskActionType  # "approve", "reject", "revert", "custom"
+    remark: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    actionCode: str | None = None
+```
+
+### Action Processing
+
+Implemented in `runtime.py:1266-1541`:
+
+```python
+def _apply_task_action(
+    cursor,
+    task_row,
+    user: AuthenticatedUser,
+    payload: WorkflowTaskActionRequest,
+) -> WorkflowTaskActionResponse:
+    # Validate task status
+    if task_row["status"] != "open":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only open tasks can be actioned."
+        )
+
+    # Validate user assignment
+    if not _current_user_matches_task(user, task_row):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not assigned to this task."
+        )
+
+    # Validate remark requirement
+    if _remark_required(task_row, payload.actionType) and not payload.remark:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A remark is required for this action."
+        )
+
+    # Resolve transition
+    action_type = payload.actionType
+    transition = _transition_for_action(
+        cursor,
+        task_row["workflow_version_id"],
+        task_row["step_definition_id"],
+        action_type,
+        payload.actionCode,
+    )
+```
+
+### Action Recording
+
+All actions are recorded in the workflow_action table:
+
+```python
+cursor.execute(
+    """INSERT INTO workflow_action (
+        workflow_instance_id,
+        step_instance_id,
+        action_type,
+        action_code,
+        actor_user_id,
+        actor_type,
+        remark_text,
+        payload
+    ) VALUES (%s, %s, %s, %s, %s, 'user', %s, %s)
+    RETURNING id""",
+    (
+        task_row["workflow_instance_id"],
+        task_row["step_instance_id"],
+        action_type,
+        payload.actionCode,
+        user.user_id,
+        payload.remark,
+        Json(payload.payload),
+    ),
+)
+```
+
+### Task Completion
+
+```python
+cursor.execute(
+    """UPDATE human_task SET status = 'completed', completed_at = now() WHERE id = %s""",
+    (task_row["id"],)
+)
+```
+
+## Remark Requirements
+
+Steps can require users to provide remarks (comments) when taking specific actions.
+
+### Validation
+
+```python
+# From runtime.py:1256-1263
+def _remark_required(task_row, action_type: str) -> bool:
+    if action_type == "approve":
+        return task_row["remark_required_on_approve"]
+    if action_type == "reject":
+        return task_row["remark_required_on_reject"]
+    if action_type == "revert":
+        return task_row["remark_required_on_revert"]
+    return False
+```
+
+### Enforcement
+
+```python
+if _remark_required(task_row, payload.actionType) and not payload.remark:
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail="A remark is required for this action."
+    )
+```
+
+<Warning>
+Remarks are stored in the `workflow_action` table's `remark_text` field and appear in the workflow audit history.
+</Warning>
+
+## Task Cancellation
+
+When a step completes, remaining tasks are cancelled:
+
+```python
+# From runtime.py:590-598
+def _cancel_other_tasks(cursor, step_instance_id, except_task_id):
+    cursor.execute(
+        """UPDATE human_task
+           SET status = 'cancelled'
+           WHERE step_instance_id = %s AND id <> %s AND status IN ('queued', 'open', 'claimed')""",
+        (step_instance_id, except_task_id)
+    )
+```
+
+This ensures users don't receive notifications or attempt actions on already-completed steps.
+
+## Priority Escalation
+
+In `priority_chain` mode, queued tasks have an `escalation_due_at` timestamp. A background worker monitors these and opens the next task when the timeout expires.
+
+### Escalation Query
+
+```sql
+CREATE INDEX idx_human_task_priority_due
+    ON human_task (escalation_due_at, step_instance_id, sequence_no)
+    WHERE status = 'queued'
+      AND approval_mode_snapshot = 'priority_chain'
+      AND escalation_due_at IS NOT NULL;
+```
+
+The worker (not yet implemented) would:
+
+1. Query tasks with `status = 'queued'` and `escalation_due_at < now()`
+2. Update the next task in sequence to `status = 'open'`
+3. Send notification to the newly-assigned user
+4. Record the escalation event
+
+## Available Actions
+
+Each task stores the actions available to the assignee based on step configuration and transitions:
+
+```python
+# From runtime.py:289-302
+def _available_actions(cursor, workflow_version_id, from_step_definition_id, allow_revert: bool):
+    cursor.execute(
+        """SELECT DISTINCT action_type FROM workflow_transition_definition
+           WHERE workflow_version_id = %s AND from_step_definition_id = %s
+           ORDER BY action_type""",
+        (workflow_version_id, from_step_definition_id)
+    )
+    actions = [row["action_type"] for row in cursor.fetchall()]
+    if not allow_revert:
+        actions = [action for action in actions if action != "revert"]
+    return actions
+```
+
+Stored in the task:
+
+```python
+cursor.execute(
+    """INSERT INTO human_task (..., available_actions, ...) VALUES (..., %s, ...)""",
+    (..., Json(available_actions), ...)
+)
+```
+
+## Task Queries
+
+### My Tasks Endpoint
+
+Retrieve tasks assigned to the current user:
+
+```python
+GET /api/v1/me/tasks
+```
+
+Query implementation:
+
+```python
+cursor.execute(
+    """SELECT
+        ht.*,
+        sd.step_code,
+        sd.step_label,
+        wi.id AS workflow_instance_id,
+        wd.name AS workflow_definition_name
+       FROM human_task ht
+       JOIN workflow_step_definition sd ON sd.id = ht.step_definition_id
+       JOIN workflow_instance wi ON wi.id = ht.workflow_instance_id
+       JOIN workflow_definition_version wdv ON wdv.id = wi.workflow_version_id
+       JOIN workflow_definition wd ON wd.id = wdv.workflow_definition_id
+       WHERE ht.assigned_user_id = %s
+         AND ht.status IN ('open', 'claimed')
+       ORDER BY ht.created_at DESC""",
+    (user.user_id,)
+)
+```
+
+### Task Detail
+
+Retrieve a specific task:
+
+```python
+GET /api/v1/human-tasks/{task_id}
+```
+
+## Task Action API
+
+### Approve
+
+```bash
+POST /api/v1/human-tasks/{task_id}/actions
+{
+  "actionType": "approve",
+  "remark": "Budget verified, approved for payment",
+  "payload": {
+    "approvedAmount": 15000
+  }
+}
+```
+
+### Reject
+
+```bash
+POST /api/v1/human-tasks/{task_id}/actions
+{
+  "actionType": "reject",
+  "remark": "Missing required documentation",
+  "payload": {
+    "missingDocs": ["receipt", "approval_form"]
+  }
+}
+```
+
+### Revert
+
+```bash
+POST /api/v1/human-tasks/{task_id}/actions
+{
+  "actionType": "revert",
+  "remark": "Sending back to manager for additional review"
+}
+```
+
+### Custom Action
+
+```bash
+POST /api/v1/human-tasks/{task_id}/actions
+{
+  "actionType": "custom",
+  "actionCode": "escalate",
+  "remark": "Complex case requiring executive review"
+}
+```
+
+## Task Notifications
+
+When a task opens, a notification is created for the assignee. See [Notifications](/concepts/notifications) for details.
+
+<Card title="Related Concepts" icon="link">
+  - [Steps](/concepts/steps) - Step definitions and associations
+  - [Transitions](/concepts/transitions) - Action routing
+  - [Notifications](/concepts/notifications) - Task notification system
+</Card>
+
+## Implementation References
+
+- **Task Creation**: `apps/api/src/api/runtime.py:363-542`
+- **Task Actions**: `apps/api/src/api/runtime.py:1266-1541`
+- **Assignee Resolution**: `apps/api/src/api/runtime.py:305-361`
+- **Schema Definitions**: `apps/api/src/api/runtime_schemas.py:59-77`
+- **Database Schema**: `infra/postgres/init/01_foundation.sql:216-234`

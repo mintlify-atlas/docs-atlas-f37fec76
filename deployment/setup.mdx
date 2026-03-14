@@ -1,0 +1,265 @@
+---
+title: 'Initial Setup'
+description: 'Complete setup guide for the Workflow Engine Platform from scratch'
+---
+
+## Overview
+
+This guide walks through setting up the Workflow Engine Platform in a development or production environment. The platform consists of:
+
+- **Web Application** (Next.js) - Frontend interface
+- **API Service** (FastAPI) - Backend workflow engine
+- **PostgreSQL Database** (Neon) - Persistent storage
+- **RabbitMQ** (Docker) - Message broker for event processing
+- **Background Workers** - Outbox event publisher and priority task releaser
+
+## Prerequisites
+
+Before you begin, ensure you have the following installed:
+
+<AccordionGroup>
+  <Accordion title="Required Tools">
+    - **Node.js** 18.x or higher
+    - **pnpm** 10.x package manager
+    - **Python** 3.12 or higher
+    - **uv** Python package manager
+    - **Docker** and Docker Compose
+    - **Git** for version control
+  </Accordion>
+  
+  <Accordion title="External Services">
+    - **Neon Account** - PostgreSQL database hosting (free tier available)
+    - Access to create and manage databases
+  </Accordion>
+</AccordionGroup>
+
+## Installation Steps
+
+<Steps>
+  <Step title="Clone the Repository">
+    Clone the project and navigate to the directory:
+    
+    ```bash
+    git clone <repository-url>
+    cd workflow-engine-platform
+    ```
+  </Step>
+
+  <Step title="Install Dependencies">
+    Install all project dependencies using pnpm:
+    
+    ```bash
+    pnpm install
+    ```
+    
+    This installs dependencies for both the web and API applications.
+  </Step>
+
+  <Step title="Install Python Tools">
+    Install the uv package manager if not already available:
+    
+    ```bash
+    python3 -m pip install --user uv
+    export PATH="$HOME/.local/bin:$PATH"
+    ```
+    
+    <Note>
+      Add the export command to your `~/.bashrc` or `~/.zshrc` for persistence.
+    </Note>
+  </Step>
+
+  <Step title="Create Neon Database">
+    1. Sign up or log in to [Neon](https://neon.tech)
+    2. Create a new project
+    3. Create a database named `neondb` (or use the default)
+    4. Copy the connection string (format: `postgresql://USER:PASSWORD@HOST/neondb?sslmode=require`)
+    
+    <Warning>
+      Keep your database credentials secure. Never commit them to version control.
+    </Warning>
+  </Step>
+
+  <Step title="Configure Environment Variables">
+    Set up environment files for both applications. See the [Environment Configuration](/deployment/environment) guide for detailed variable descriptions.
+    
+    **Web Application** (`apps/web/.env.local`):
+    ```bash
+    DATABASE_URL=postgresql://USER:PASSWORD@YOUR_NEON_HOST/neondb?sslmode=require
+    BETTER_AUTH_SECRET=<generate-a-long-random-secret>
+    BETTER_AUTH_URL=http://localhost:3000
+    NEXT_PUBLIC_APP_URL=http://localhost:3000
+    NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+    ```
+    
+    **API Service** (`apps/api/.env`):
+    ```bash
+    WORKFLOW_DATABASE_URL=postgresql://USER:PASSWORD@YOUR_NEON_HOST/neondb?sslmode=require
+    RABBITMQ_URL=amqp://workflow:workflow@localhost:5672/
+    OUTBOX_EXCHANGE=workflow.events
+    WEB_APP_URL=http://localhost:3000
+    BETTER_AUTH_ISSUER=http://localhost:3000
+    BETTER_AUTH_AUDIENCE=http://localhost:3000
+    BETTER_AUTH_JWKS_URL=http://localhost:3000/api/auth/jwks
+    ```
+    
+    <Tip>
+      Generate a secure random secret for `BETTER_AUTH_SECRET`:
+      ```bash
+      openssl rand -base64 32
+      ```
+    </Tip>
+  </Step>
+
+  <Step title="Bootstrap the Database">
+    Initialize the database schema using the bootstrap script:
+    
+    ```bash
+    pnpm bootstrap:db
+    ```
+    
+    This creates all required tables, indexes, and constraints. See [Database Setup](/deployment/database) for more details.
+  </Step>
+
+  <Step title="Start RabbitMQ">
+    Launch RabbitMQ using Docker Compose:
+    
+    ```bash
+    docker compose -f infra/docker-compose.yml up -d
+    ```
+    
+    Verify RabbitMQ is running:
+    ```bash
+    docker ps | grep rabbitmq
+    ```
+    
+    Access the management UI at [http://localhost:15672](http://localhost:15672) (credentials: `workflow` / `workflow`)
+  </Step>
+
+  <Step title="Start the Applications">
+    Open two terminal windows and start both services:
+    
+    **Terminal 1 - API Service:**
+    ```bash
+    pnpm dev:api
+    ```
+    
+    **Terminal 2 - Web Application:**
+    ```bash
+    pnpm dev:web
+    ```
+    
+    The API will be available at `http://localhost:8000` and the web app at `http://localhost:3000`.
+  </Step>
+
+  <Step title="Seed Test Users (Optional)">
+    For development, seed the database with test users:
+    
+    ```bash
+    pnpm --dir apps/web seed:users
+    ```
+    
+    This creates the following accounts (password: `password1234`):
+    - `admin@example.com`
+    - `manager@example.com`
+    - `reviewer1@example.com`
+    - `reviewer2@example.com`
+    - `requester@example.com`
+  </Step>
+</Steps>
+
+## Verify Installation
+
+Check that all components are running correctly:
+
+<CardGroup cols={2}>
+  <Card title="Web Application" icon="browser">
+    Navigate to `http://localhost:3000` and verify the login page loads.
+  </Card>
+  
+  <Card title="API Service" icon="server">
+    Visit `http://localhost:8000/docs` to see the FastAPI documentation.
+  </Card>
+  
+  <Card title="RabbitMQ" icon="message">
+    Access `http://localhost:15672` and log in with `workflow` / `workflow`.
+  </Card>
+  
+  <Card title="Database" icon="database">
+    Run a test query to verify connectivity:
+    ```bash
+    psql $DATABASE_URL -c "SELECT COUNT(*) FROM workflow_definition;"
+    ```
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Environment Configuration" icon="gear" href="/deployment/environment">
+    Learn about all available environment variables and configuration options.
+  </Card>
+  
+  <Card title="Worker Deployment" icon="cogs" href="/deployment/workers">
+    Set up background workers for event processing and task management.
+  </Card>
+  
+  <Card title="Database Management" icon="database" href="/deployment/database">
+    Understand database schema, migrations, and maintenance.
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Database Connection Fails">
+    - Verify your Neon connection string is correct
+    - Ensure `sslmode=require` is included in the URL
+    - Check that both `DATABASE_URL` and `WORKFLOW_DATABASE_URL` point to the same database
+    - Confirm your IP is allowed in Neon's firewall settings
+  </Accordion>
+  
+  <Accordion title="RabbitMQ Won't Start">
+    - Check if port 5672 or 15672 is already in use:
+      ```bash
+      lsof -i :5672
+      lsof -i :15672
+      ```
+    - Remove existing containers:
+      ```bash
+      docker rm -f workflow-engine-rabbitmq
+      ```
+    - Check Docker logs:
+      ```bash
+      docker logs workflow-engine-rabbitmq
+      ```
+  </Accordion>
+  
+  <Accordion title="UV Command Not Found">
+    - Install uv manually:
+      ```bash
+      python3 -m pip install --user uv
+      ```
+    - Add to PATH:
+      ```bash
+      export PATH="$HOME/.local/bin:$PATH"
+      ```
+    - Verify installation:
+      ```bash
+      uv --version
+      ```
+  </Accordion>
+  
+  <Accordion title="Port Already in Use">
+    If ports 3000 or 8000 are occupied:
+    - Find the process:
+      ```bash
+      lsof -i :3000
+      lsof -i :8000
+      ```
+    - Kill the process or change ports in your environment configuration
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+  This setup guide is for development environments. For production deployment, see the production considerations in each component's documentation.
+</Warning>

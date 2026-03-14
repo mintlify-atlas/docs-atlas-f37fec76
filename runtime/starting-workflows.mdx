@@ -1,0 +1,338 @@
+---
+title: Starting Workflows
+description: Launch workflow instances from saved definitions via API or UI
+---
+
+## Overview
+
+Workflow instances are runtime executions of published workflow definitions. Each instance progresses through steps defined in the graph, maintains its own state, and can be uniquely identified by a business key.
+
+## Starting a Workflow Instance
+
+### POST /api/v1/workflow-instances
+
+Create and start a new workflow instance from a published definition.
+
+**Request Body:**
+
+```json
+{
+  "workflowDefinitionId": "uuid",
+  "workflowKey": "invoice-approval",
+  "businessKey": "invoice-2026-001",
+  "inputData": {
+    "amount": 15000,
+    "vendor": "Acme Corp"
+  },
+  "contextData": {
+    "department": "finance",
+    "priority": "high"
+  }
+}
+```
+
+**Parameters:**
+
+<ParamField path="workflowDefinitionId" type="UUID" optional>
+  The UUID of the workflow definition. Either this or `workflowKey` is required.
+</ParamField>
+
+<ParamField path="workflowKey" type="string" optional>
+  The unique key of the workflow definition (e.g., `"invoice-approval"`). Either this or `workflowDefinitionId` is required.
+</ParamField>
+
+<ParamField path="businessKey" type="string" optional>
+  A human-readable identifier for this instance (e.g., `"invoice-2026-001"`). If the same business key is used multiple times, the platform increments the `runNumber`.
+</ParamField>
+
+<ParamField path="inputData" type="object" default="{}">
+  Initial input payload for the workflow. This data is preserved as the original input and copied to `contextData`.
+</ParamField>
+
+<ParamField path="contextData" type="object" default="{}">
+  Working context that flows through the workflow. Step output mappings update this object as the workflow progresses.
+</ParamField>
+
+**Response (201 Created):**
+
+```json
+{
+  "item": {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "workflowDefinitionId": "123e4567-e89b-12d3-a456-426614174001",
+    "workflowDefinitionKey": "invoice-approval",
+    "workflowDefinitionName": "Invoice Approval",
+    "workflowVersionId": "123e4567-e89b-12d3-a456-426614174002",
+    "businessKey": "invoice-2026-001",
+    "runNumber": 1,
+    "status": "waiting",
+    "currentStepCode": "manager-review",
+    "currentStepLabel": "Manager Review",
+    "startedBy": "user-id-123",
+    "startedAt": "2026-03-14T10:30:00Z",
+    "completedAt": null,
+    "inputData": {
+      "amount": 15000,
+      "vendor": "Acme Corp"
+    },
+    "contextData": {
+      "department": "finance",
+      "priority": "high",
+      "amount": 15000,
+      "vendor": "Acme Corp"
+    },
+    "outputData": {},
+    "graphJson": {
+      "steps": [...],
+      "transitions": [...]
+    },
+    "builderLayout": {
+      "nodes": [...],
+      "edges": [...]
+    },
+    "steps": [
+      {
+        "id": "step-instance-1",
+        "stepCode": "start",
+        "stepLabel": "Start",
+        "stepType": "start",
+        "status": "completed",
+        "visitCount": 1,
+        "enteredAt": "2026-03-14T10:30:00Z",
+        "completedAt": "2026-03-14T10:30:01Z",
+        "waitingSince": null,
+        "resultAction": "approve"
+      },
+      {
+        "id": "step-instance-2",
+        "stepCode": "manager-review",
+        "stepLabel": "Manager Review",
+        "stepType": "human_task",
+        "status": "waiting",
+        "visitCount": 1,
+        "enteredAt": "2026-03-14T10:30:01Z",
+        "completedAt": null,
+        "waitingSince": "2026-03-14T10:30:01Z",
+        "resultAction": null
+      }
+    ],
+    "actions": [
+      {
+        "id": "action-1",
+        "actionType": "start",
+        "actionCode": null,
+        "actorUserId": "user-id-123",
+        "actorType": "user",
+        "remarkText": null,
+        "payload": {
+          "workflowDefinitionKey": "invoice-approval",
+          "businessKey": "invoice-2026-001"
+        },
+        "createdAt": "2026-03-14T10:30:00Z"
+      }
+    ]
+  }
+}
+```
+
+## Workflow Status Values
+
+After starting, the instance transitions through these statuses:
+
+| Status | Description |
+|--------|-------------|
+| `running` | Currently executing automatic steps |
+| `waiting` | Paused at a human task step, waiting for user action |
+| `paused` | Waiting for a subworkflow to complete |
+| `completed` | Successfully reached a terminal step via approve action |
+| `rejected` | Reached a terminal step via reject action |
+| `failed` | Error during execution |
+| `cancelled` | Manually cancelled by a user or system |
+
+<Note>
+When a workflow instance starts, it immediately executes from the start step until it reaches a human task, subworkflow, or terminal step.
+</Note>
+
+## Version Resolution
+
+The platform automatically resolves the correct version to execute:
+
+1. If `workflowDefinitionId` is provided, the system selects the latest published version for that definition
+2. If `workflowKey` is provided, it finds the definition by key, then selects the latest published version
+3. The version selection query prioritizes `is_published DESC, version_no DESC`
+
+<CodeGroup>
+```python Python (API Implementation)
+# From runtime.py:148-188
+def _resolve_version(cursor, workflow_definition_id=None, workflow_key=None):
+    if workflow_definition_id is not None:
+        cursor.execute(
+            """
+            SELECT d.id AS workflow_definition_id, d.key, d.name, v.*
+            FROM workflow_definition d
+            JOIN LATERAL (
+                SELECT *
+                FROM workflow_definition_version v
+                WHERE v.workflow_definition_id = d.id
+                ORDER BY is_published DESC, version_no DESC
+                LIMIT 1
+            ) v ON TRUE
+            WHERE d.id = %s
+            """,
+            (workflow_definition_id,),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT d.id AS workflow_definition_id, d.key, d.name, v.*
+            FROM workflow_definition d
+            JOIN LATERAL (
+                SELECT *
+                FROM workflow_definition_version v
+                WHERE v.workflow_definition_id = d.id
+                ORDER BY is_published DESC, version_no DESC
+                LIMIT 1
+            ) v ON TRUE
+            WHERE d.key = %s
+            """,
+            (workflow_key,),
+        )
+```
+
+```typescript TypeScript (Frontend)
+// From runtime-console.tsx:291-329
+async function startInstance() {
+  if (!selectedDefinitionId) {
+    setError("Select a workflow definition first.")
+    return
+  }
+
+  setIsBusy(true)
+  setError(null)
+  setStatus("Starting workflow instance...")
+
+  try {
+    const response = await authedFetch("/api/v1/workflow-instances", {
+      method: "POST",
+      body: JSON.stringify({
+        workflowDefinitionId: selectedDefinitionId,
+        businessKey: businessKey || null,
+        inputData: {
+          source: "runtime-console",
+        },
+        contextData: {
+          startedFromUi: true,
+        },
+      }),
+    })
+
+    const payload = (await response.json()) as { 
+      item?: WorkflowInstanceDetail
+      detail?: string 
+    }
+    
+    if (!response.ok || !payload.item) {
+      throw new Error(payload.detail ?? "Unable to start workflow instance.")
+    }
+
+    setSelectedInstance(payload.item)
+    setStatus(`Started workflow instance ${payload.item.id}.`)
+    await refreshAll()
+  } catch (startError) {
+    setError(startError instanceof Error ? startError.message : "Unable to start workflow.")
+    setStatus("Workflow instance start failed.")
+  } finally {
+    setIsBusy(false)
+  }
+}
+```
+</CodeGroup>
+
+## Run Numbers and Business Keys
+
+The `runNumber` increments automatically for repeated executions of the same business key:
+
+```python
+# From runtime.py:1101-1109
+cursor.execute(
+    """
+    SELECT COALESCE(MAX(run_number), 0) AS max_run_number
+    FROM workflow_instance
+    WHERE workflow_version_id = %s AND business_key IS NOT DISTINCT FROM %s
+    """,
+    (version["id"], payload.businessKey),
+)
+run_number = cursor.fetchone()["max_run_number"] + 1
+```
+
+This allows you to track retries or resubmissions:
+
+- First submission: `invoice-2026-001` → `runNumber: 1`
+- Resubmission: `invoice-2026-001` → `runNumber: 2`
+
+## Initial Execution Flow
+
+After creation, the instance immediately enters the start step:
+
+```python
+# From runtime.py:1179-1180
+start_step = _get_start_step(cursor, version["id"])
+_enter_step(cursor, workflow_instance, start_step, "approve")
+```
+
+The `_enter_step` function:
+
+1. Creates a step instance record
+2. If the step is a **human task**, creates task assignments and sets status to `waiting`
+3. If the step is a **subworkflow**, starts the child workflow and sets status to `paused`
+4. If the step is **automatic**, completes it immediately and follows the transition
+5. If the step is **terminal**, sets the workflow status to `completed` or `rejected`
+
+## Error Handling
+
+**404 Not Found:**
+
+```json
+{
+  "detail": "Workflow definition not found."
+}
+```
+
+Returned when neither `workflowDefinitionId` nor `workflowKey` matches an existing definition.
+
+**422 Unprocessable Entity:**
+
+```json
+{
+  "detail": "workflowDefinitionId or workflowKey is required."
+}
+```
+
+Returned when both identifiers are missing.
+
+```json
+{
+  "detail": "Workflow version has no start step."
+}
+```
+
+Returned when the resolved version has no step with `step_type = 'start'`.
+
+## UI Workflow
+
+The Operations page (`/operations`) provides a visual interface for starting workflows:
+
+1. **Select Definition:** Choose from the dropdown of published workflow definitions
+2. **Enter Business Key:** Optional human-readable identifier (e.g., `"invoice-2026-001"`)
+3. **Click "Start Instance":** The UI calls `POST /api/v1/workflow-instances`
+4. **View Result:** The instance detail loads automatically in the "Selected instance" tab
+
+<Note>
+The runtime console uses realtime SSE updates to automatically refresh the instance list when new workflows start.
+</Note>
+
+## Related Endpoints
+
+- [Listing Workflow Instances](/runtime/workflow-monitoring#listing-instances)
+- [Viewing Instance Details](/runtime/workflow-monitoring#instance-details)
+- [Task Inbox](/runtime/task-inbox)

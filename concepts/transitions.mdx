@@ -1,0 +1,567 @@
+---
+title: Transitions
+description: Understanding workflow transitions and action-based routing in the Workflow Engine
+---
+
+## Overview
+
+Transitions define the connections between workflow steps, specifying how the workflow advances based on user actions or system events. Each transition is tied to a specific action type and can include conditional logic.
+
+## Transition Schema
+
+### Pydantic Model
+
+```python
+class WorkflowTransitionInput(BaseModel):
+    fromStepCode: str = Field(min_length=1)
+    toStepCode: str | None = None
+    actionType: ActionType
+    actionCode: str | None = None
+    transitionLabel: str = ""
+    description: str = ""
+    conditionExpression: str | None = None
+    priority: int = 0
+```
+
+### Database Schema
+
+```sql
+CREATE TABLE workflow_transition_definition (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    workflow_version_id uuid NOT NULL REFERENCES workflow_definition_version(id),
+    from_step_definition_id uuid NOT NULL REFERENCES workflow_step_definition(id),
+    to_step_definition_id uuid REFERENCES workflow_step_definition(id),
+    action_type text NOT NULL,
+    action_code text,
+    transition_label text,
+    description text,
+    condition_expression text,
+    priority integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+## Action Types
+
+Transitions are triggered by specific actions:
+
+```python
+ActionType = Literal[
+    "approve",  # Forward progress
+    "reject",   # Rejection path
+    "revert",   # Return to previous step
+    "custom"    # Named custom action
+]
+```
+
+### Action Behavior
+
+<AccordionGroup>
+  <Accordion title="approve" icon="check">
+    The standard forward transition. Used for approvals, completions, and normal workflow progression.
+    
+    **Example**: User approves an invoice → workflow advances to next approval stage
+  </Accordion>
+  
+  <Accordion title="reject" icon="xmark">
+    Rejection or denial path. Often leads to end states or revision loops.
+    
+    **Example**: Manager rejects expense report → workflow returns to requester for revision
+  </Accordion>
+  
+  <Accordion title="revert" icon="rotate-left">
+    Returns the workflow to a previous step. Only available if the source step has `allowRevert: true`.
+    
+    **Example**: CFO sends approval back to manager for additional review
+  </Accordion>
+  
+  <Accordion title="custom" icon="code">
+    Named custom actions for domain-specific operations. Requires `actionCode` to be specified.
+    
+    **Example**: "escalate", "delegate", "request_information"
+  </Accordion>
+</AccordionGroup>
+
+## Transition Properties
+
+### Core Fields
+
+<ResponseField name="fromStepCode" type="string" required>
+  Source step code where the transition originates
+</ResponseField>
+
+<ResponseField name="toStepCode" type="string | null">
+  Destination step code. `null` indicates a terminal transition (workflow ends)
+</ResponseField>
+
+<ResponseField name="actionType" type="ActionType" required>
+  Type of action that triggers this transition: `approve`, `reject`, `revert`, or `custom`
+</ResponseField>
+
+<ResponseField name="actionCode" type="string" optional>
+  Required for custom actions. Identifies the specific custom operation (e.g., "escalate_to_cfo")
+</ResponseField>
+
+<ResponseField name="transitionLabel" type="string">
+  Display label shown on the visual workflow builder edge (e.g., "Approved", "Needs Revision")
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Human-readable description of what this transition represents
+</ResponseField>
+
+<ResponseField name="conditionExpression" type="string | null">
+  Optional conditional expression evaluated against workflow context data
+</ResponseField>
+
+<ResponseField name="priority" type="integer" default="0">
+  Evaluation order when multiple transitions match. Lower numbers = higher priority.
+</ResponseField>
+
+## Terminal Transitions
+
+A transition with `toStepCode: null` marks a terminal path—the workflow completes when this transition is taken.
+
+```python
+# From runtime.py:1479-1496
+if transition is None or transition["to_step_definition_id"] is None:
+    new_status = "completed" if action_type == "approve" else "rejected"
+    cursor.execute(
+        """UPDATE workflow_instance
+           SET status = %s, completed_at = now(), updated_at = now()
+           WHERE id = %s""",
+        (new_status, task_row["workflow_instance_id"])
+    )
+    _record_status_history(
+        cursor,
+        task_row["workflow_instance_id"],
+        old_status,
+        new_status,
+        reason=f"task action {action_type}",
+        changed_by_action_id=action_id,
+    )
+```
+
+### Terminal Transition Example
+
+```json
+{
+  "fromStepCode": "final_approval",
+  "toStepCode": null,
+  "actionType": "approve",
+  "transitionLabel": "Approved - Complete",
+  "description": "Invoice fully approved, workflow completes"
+}
+```
+
+<Note>
+When a terminal transition is taken with `actionType: "approve"`, the workflow status becomes `completed`. With `actionType: "reject"`, it becomes `rejected`.
+</Note>
+
+## Conditional Transitions
+
+Transitions can include conditional expressions evaluated against the workflow's context data.
+
+### Condition Evaluation
+
+When multiple transitions exist for the same `fromStepCode` and `actionType`, they are evaluated in priority order:
+
+```python
+# From runtime.py:262-274
+def _get_transitions(cursor, workflow_version_id, from_step_definition_id, action_type: str):
+    cursor.execute(
+        """SELECT * FROM workflow_transition_definition
+           WHERE workflow_version_id = %s
+             AND from_step_definition_id = %s
+             AND action_type = %s
+           ORDER BY priority, created_at""",
+        (workflow_version_id, from_step_definition_id, action_type)
+    )
+    return cursor.fetchall()
+```
+
+### Conditional Example
+
+```json
+[
+  {
+    "fromStepCode": "amount_check",
+    "toStepCode": "cfo_approval",
+    "actionType": "approve",
+    "transitionLabel": "High Value",
+    "conditionExpression": "$.amount > 10000",
+    "priority": 1
+  },
+  {
+    "fromStepCode": "amount_check",
+    "toStepCode": "manager_approval",
+    "actionType": "approve",
+    "transitionLabel": "Standard",
+    "conditionExpression": null,
+    "priority": 2
+  }
+]
+```
+
+<Warning>
+Condition expressions are currently stored but not yet evaluated by the runtime. The first unconditional transition is taken if no conditional matches.
+</Warning>
+
+## Transition Validation
+
+The workflow validator enforces several critical rules to prevent invalid transition configurations.
+
+### Validation Rules
+
+Implemented in `workflows.py:93-122`:
+
+```python
+for transition in payload.transitions:
+    # Rule 1: Source step must exist
+    if transition.fromStepCode not in steps_by_code:
+        errors.append(f"Transition source step '{transition.fromStepCode}' does not exist.")
+        continue
+
+    # Rule 2: Target step must exist (if specified)
+    if transition.toStepCode and transition.toStepCode not in steps_by_code:
+        errors.append(f"Transition target step '{transition.toStepCode}' does not exist.")
+        continue
+
+    # Rule 3: Custom actions require actionCode
+    if transition.actionType == "custom" and not transition.actionCode:
+        errors.append(
+            f"Transition '{transition.fromStepCode}' -> '{transition.toStepCode}' requires an actionCode."
+        )
+
+    # Rule 4: Prevent unconditional self-loops
+    if (
+        transition.toStepCode == transition.fromStepCode
+        and transition.conditionExpression is None
+    ):
+        errors.append(
+            f"Unconditional self-loop detected on step '{transition.fromStepCode}'."
+        )
+
+    # Rule 5: Only one unconditional transition per (fromStep, actionType)
+    if transition.conditionExpression is None:
+        signature = (transition.fromStepCode, transition.actionType)
+        if signature in seen_unconditional:
+            errors.append(
+                "Only one unconditional transition is allowed per source step and action type."
+            )
+        seen_unconditional.add(signature)
+```
+
+### Required Transitions
+
+Every non-terminal step must have at least one outgoing transition:
+
+```python
+# From workflows.py:124-130
+for step in payload.steps:
+    if step.stepType == "subworkflow" and step.subworkflowMapping is None:
+        errors.append(f"Subworkflow step '{step.stepCode}' requires a subworkflow mapping.")
+    if step.stepType == "end" or step.isTerminal:
+        continue
+    if not outgoing.get(step.stepCode):
+        errors.append(f"Step '{step.stepCode}' must have at least one outgoing transition.")
+```
+
+## Transition Resolution
+
+At runtime, the engine resolves which transition to follow based on the action taken.
+
+### Resolution Logic
+
+```python
+# From runtime.py:600-609
+def _transition_for_action(cursor, workflow_version_id, from_step_definition_id, action_type, action_code):
+    transitions = _get_transitions(cursor, workflow_version_id, from_step_definition_id, action_type)
+    
+    # For custom actions, match by action_code
+    if action_type == "custom" and action_code:
+        for transition in transitions:
+            if transition["action_code"] == action_code:
+                return transition
+        return None
+    
+    # For standard actions, return first transition (highest priority)
+    return transitions[0] if transitions else None
+```
+
+### Resolution Example
+
+```python
+# User approves a human task
+transition = _transition_for_action(
+    cursor,
+    workflow_version_id="123e4567-e89b-12d3-a456-426614174000",
+    from_step_definition_id="456e7890-e89b-12d3-a456-426614174111",
+    action_type="approve",
+    action_code=None
+)
+
+if transition and transition["to_step_definition_id"]:
+    next_step = _get_step_by_id(cursor, transition["to_step_definition_id"])
+    _enter_step(cursor, workflow_instance, next_step, "approve")
+else:
+    # Terminal transition - complete workflow
+    _complete_workflow(cursor, workflow_instance, step_instance, "approve")
+```
+
+## Transition Examples
+
+### Simple Approval Flow
+
+```json
+[
+  {
+    "fromStepCode": "submit",
+    "toStepCode": "manager_review",
+    "actionType": "approve",
+    "transitionLabel": "Submit for Review",
+    "description": "Employee submits expense report"
+  },
+  {
+    "fromStepCode": "manager_review",
+    "toStepCode": "finance_review",
+    "actionType": "approve",
+    "transitionLabel": "Manager Approved"
+  },
+  {
+    "fromStepCode": "manager_review",
+    "toStepCode": "submit",
+    "actionType": "reject",
+    "transitionLabel": "Needs Revision",
+    "description": "Send back to employee for corrections"
+  },
+  {
+    "fromStepCode": "finance_review",
+    "toStepCode": null,
+    "actionType": "approve",
+    "transitionLabel": "Approved - Complete"
+  }
+]
+```
+
+### Multi-Path Conditional Flow
+
+```json
+[
+  {
+    "fromStepCode": "risk_assessment",
+    "toStepCode": "executive_review",
+    "actionType": "approve",
+    "transitionLabel": "High Risk",
+    "conditionExpression": "$.riskScore > 7",
+    "priority": 1
+  },
+  {
+    "fromStepCode": "risk_assessment",
+    "toStepCode": "standard_approval",
+    "actionType": "approve",
+    "transitionLabel": "Medium Risk",
+    "conditionExpression": "$.riskScore > 4 && $.riskScore <= 7",
+    "priority": 2
+  },
+  {
+    "fromStepCode": "risk_assessment",
+    "toStepCode": "auto_approve",
+    "actionType": "approve",
+    "transitionLabel": "Low Risk",
+    "conditionExpression": null,
+    "priority": 3
+  }
+]
+```
+
+### Custom Action Example
+
+```json
+[
+  {
+    "fromStepCode": "legal_review",
+    "toStepCode": "legal_director",
+    "actionType": "custom",
+    "actionCode": "escalate",
+    "transitionLabel": "Escalate to Director",
+    "description": "Complex case requiring director review"
+  },
+  {
+    "fromStepCode": "legal_review",
+    "toStepCode": "submit",
+    "actionType": "custom",
+    "actionCode": "request_information",
+    "transitionLabel": "Request More Info",
+    "description": "Return to requester for additional details"
+  },
+  {
+    "fromStepCode": "legal_review",
+    "toStepCode": "compliance_check",
+    "actionType": "approve",
+    "transitionLabel": "Approved"
+  }
+]
+```
+
+## Visual Builder Integration
+
+Transitions are rendered as edges in the React Flow visual builder. The `builderLayout` stores edge positioning:
+
+```python
+# From workflows.py:39-51
+for transition in payload.transitions:
+    edges.append(
+        {
+            "id": f"{transition.fromStepCode}-{transition.actionType}-{transition.toStepCode or 'terminal'}",
+            "source": transition.fromStepCode,
+            "target": transition.toStepCode,
+            "label": transition.transitionLabel,
+            "data": {
+                "actionType": transition.actionType,
+                "description": transition.description,
+            },
+        }
+    )
+```
+
+### Builder Layout Structure
+
+```json
+{
+  "nodes": [
+    {
+      "id": "submit",
+      "position": {"x": 0, "y": 120},
+      "data": {"label": "Submit", "stepType": "start"}
+    },
+    {
+      "id": "manager_review",
+      "position": {"x": 220, "y": 40},
+      "data": {"label": "Manager Review", "stepType": "human_task"}
+    }
+  ],
+  "edges": [
+    {
+      "id": "submit-approve-manager_review",
+      "source": "submit",
+      "target": "manager_review",
+      "label": "Submit for Review",
+      "data": {
+        "actionType": "approve",
+        "description": "Employee submits expense report"
+      }
+    }
+  ],
+  "viewport": {"x": 0, "y": 0, "zoom": 1}
+}
+```
+
+## Transition Storage
+
+Transitions are persisted when a workflow version is created:
+
+```python
+# From workflows.py:653-680
+for transition in payload.transitions:
+    cursor.execute(
+        """INSERT INTO workflow_transition_definition (
+            workflow_version_id,
+            from_step_definition_id,
+            to_step_definition_id,
+            action_type,
+            action_code,
+            transition_label,
+            description,
+            condition_expression,
+            priority
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+        (
+            version_id,
+            step_id_by_code[transition.fromStepCode],
+            step_id_by_code[transition.toStepCode] if transition.toStepCode else None,
+            transition.actionType,
+            transition.actionCode,
+            transition.transitionLabel,
+            transition.description,
+            transition.conditionExpression,
+            transition.priority,
+        ),
+    )
+```
+
+## Transition Loading
+
+Transitions are retrieved with step information for display:
+
+```python
+# From workflows.py:320-410
+cursor.execute(
+    """SELECT * FROM workflow_transition_definition
+       WHERE workflow_version_id = %s
+       ORDER BY priority, created_at""",
+    (version_id,)
+)
+transition_rows = cursor.fetchall()
+
+transitions = [
+    {
+        "id": row["id"],
+        "fromStepCode": step_code_by_id[row["from_step_definition_id"]],
+        "toStepCode": (
+            step_code_by_id[row["to_step_definition_id"]]
+            if row["to_step_definition_id"] is not None
+            else None
+        ),
+        "actionType": row["action_type"],
+        "actionCode": row["action_code"],
+        "transitionLabel": row["transition_label"] or "",
+        "description": row["description"] or "",
+        "conditionExpression": row["condition_expression"],
+        "priority": row["priority"],
+    }
+    for row in transition_rows
+]
+```
+
+<Card title="Related Concepts" icon="link">
+  - [Workflows](/concepts/workflows) - Workflow definitions and instances
+  - [Steps](/concepts/steps) - Individual workflow stages
+  - [Human Tasks](/concepts/human-tasks) - Task actions and approvals
+</Card>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use descriptive transition labels">
+    Labels appear in the visual builder and help users understand workflow flow at a glance.
+    
+    **Good**: "Approved - Forward to Finance"
+    
+    **Bad**: "Next"
+  </Accordion>
+  
+  <Accordion title="Set explicit priorities for conditional transitions">
+    When multiple conditions could match, priority order determines which path is taken.
+  </Accordion>
+  
+  <Accordion title="Always provide a fallback unconditional transition">
+    If all conditional transitions fail to match, the unconditional transition (lowest priority) acts as a safety net.
+  </Accordion>
+  
+  <Accordion title="Use custom actions sparingly">
+    Custom actions add complexity. Standard approve/reject/revert actions cover most business cases.
+  </Accordion>
+  
+  <Accordion title="Document terminal transitions clearly">
+    Make it obvious in the label and description that a transition ends the workflow.
+  </Accordion>
+</AccordionGroup>
+
+## Implementation References
+
+- **Transition Validation**: `apps/api/src/api/workflows.py:93-122`
+- **Transition Resolution**: `apps/api/src/api/runtime.py:600-609`
+- **Transition Storage**: `apps/api/src/api/workflows.py:653-680`
+- **Schema Definitions**: `apps/api/src/api/workflow_schemas.py:74-83`
+- **Database Schema**: `infra/postgres/init/01_foundation.sql:133-145`

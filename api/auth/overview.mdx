@@ -1,0 +1,180 @@
+---
+title: Authentication Overview
+description: Learn how to authenticate API requests using Better Auth JWT tokens
+---
+
+The Workflow Engine API uses [Better Auth](https://www.better-auth.com/) for authentication and authorization. All protected endpoints require a valid JWT token in the `Authorization` header.
+
+## Authentication Flow
+
+The platform uses Better Auth with JWT plugin for secure, stateless authentication:
+
+1. **Sign Up / Sign In**: Users authenticate through the Next.js web app at `/api/auth/*` endpoints
+2. **Token Generation**: Better Auth issues a JWT token upon successful authentication
+3. **Token Storage**: The client stores the JWT token (typically in cookies or local storage)
+4. **API Requests**: Include the JWT token in the `Authorization` header for all API requests
+5. **Token Verification**: FastAPI backend verifies the JWT using Better Auth's JWKS endpoint
+
+## Getting a JWT Token
+
+Authenticate through the Better Auth endpoints hosted on the Next.js application:
+
+<CodeGroup>
+```bash Sign In
+curl -X POST http://localhost:3000/api/auth/sign-in/email \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "admin@example.com",
+    "password": "password1234"
+  }'
+```
+
+```bash Sign Up
+curl -X POST http://localhost:3000/api/auth/sign-up/email \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securepassword",
+    "name": "John Doe"
+  }'
+```
+</CodeGroup>
+
+The response includes session information and a JWT token accessible via the Better Auth client.
+
+## Using JWT Tokens
+
+Include the JWT token in the `Authorization` header using the Bearer scheme:
+
+```bash
+curl http://localhost:8000/api/v1/me \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Authorization Header Format
+
+```
+Authorization: Bearer <jwt_token>
+```
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token containing the JWT from Better Auth. Format: `Bearer <token>`
+</ParamField>
+
+## JWT Verification Process
+
+The FastAPI backend (`apps/api/src/api/auth.py`) verifies JWT tokens using:
+
+1. **JWKS Endpoint**: Fetches signing keys from `http://localhost:3000/api/auth/jwks`
+2. **Signature Verification**: Validates the token signature using EdDSA, RS256, or ES256 algorithms
+3. **Claims Validation**: Verifies `aud` (audience) and `iss` (issuer) claims match the configured values
+4. **Subject Extraction**: Extracts user ID from the `sub` claim
+
+### Verified Claims
+
+The API validates the following JWT claims:
+
+<ResponseField name="sub" type="string" required>
+  Subject claim containing the user ID. Must be present and non-empty.
+</ResponseField>
+
+<ResponseField name="aud" type="string" required>
+  Audience claim. Must match `BETTER_AUTH_AUDIENCE` (default: `http://localhost:3000`)
+</ResponseField>
+
+<ResponseField name="iss" type="string" required>
+  Issuer claim. Must match `BETTER_AUTH_ISSUER` (default: `http://localhost:3000`)
+</ResponseField>
+
+<ResponseField name="email" type="string">
+  User's email address (optional)
+</ResponseField>
+
+## Configuration
+
+The authentication system requires these environment variables:
+
+### API Configuration (`apps/api/.env`)
+
+```bash
+BETTER_AUTH_ISSUER=http://localhost:3000
+BETTER_AUTH_AUDIENCE=http://localhost:3000
+BETTER_AUTH_JWKS_URL=http://localhost:3000/api/auth/jwks
+```
+
+### Web App Configuration (`apps/web/.env.local`)
+
+```bash
+BETTER_AUTH_SECRET=your-secret-key-change-in-production
+BETTER_AUTH_URL=http://localhost:3000
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+DATABASE_URL=postgresql://USER:PASSWORD@YOUR_NEON_HOST/neondb?sslmode=require
+```
+
+## Error Responses
+
+Authentication failures return standard HTTP error responses:
+
+### 401 Unauthorized - Missing Token
+
+```json
+{
+  "detail": "Missing bearer token."
+}
+```
+
+### 401 Unauthorized - Invalid Token
+
+```json
+{
+  "detail": "Invalid Better Auth token: Signature has expired"
+}
+```
+
+Common reasons for invalid tokens:
+- Expired JWT token
+- Invalid signature
+- Token signed with wrong key
+- Missing or invalid `sub` claim
+- Audience or issuer mismatch
+
+### 401 Unauthorized - Missing Subject
+
+```json
+{
+  "detail": "Better Auth token is missing the subject claim."
+}
+```
+
+## Test Users
+
+For local development, seed test users with:
+
+```bash
+pnpm --dir apps/web seed:users
+```
+
+Available test accounts (password: `password1234`):
+- `admin@example.com`
+- `manager@example.com`
+- `reviewer1@example.com`
+- `reviewer2@example.com`
+- `requester@example.com`
+
+## Security Best Practices
+
+<Warning>
+  Never commit JWT tokens or secrets to version control. Always use environment variables for sensitive configuration.
+</Warning>
+
+- Store JWT tokens securely (httpOnly cookies recommended for web apps)
+- Use HTTPS in production to prevent token interception
+- Set appropriate token expiration times
+- Rotate `BETTER_AUTH_SECRET` regularly in production
+- Validate `aud` and `iss` claims match your deployment URLs
+
+## Related Endpoints
+
+<Card title="GET /api/v1/me" icon="user" href="/api/auth/me">
+  Get current authenticated user information
+</Card>

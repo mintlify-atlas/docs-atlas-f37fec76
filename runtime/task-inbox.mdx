@@ -1,0 +1,423 @@
+---
+title: Task Inbox
+description: View and manage human tasks assigned to the current user
+---
+
+## Overview
+
+Human tasks are created when a workflow instance reaches a step with `step_type = 'human_task'`. Tasks are assigned to specific users, roles, or groups based on the step's assignment policy and associations.
+
+## Listing My Tasks
+
+### GET /api/v1/me/tasks
+
+Retrieve all tasks assigned to the authenticated user.
+
+**Response (200 OK):**
+
+```json
+{
+  "items": [
+    {
+      "id": "task-uuid-1",
+      "workflowInstanceId": "workflow-instance-uuid",
+      "stepInstanceId": "step-instance-uuid",
+      "stepDefinitionId": "step-definition-uuid",
+      "stepCode": "manager-review",
+      "stepLabel": "Manager Review",
+      "assignedUserId": "user-id-123",
+      "assignedRoleKey": null,
+      "assignedGroupKey": null,
+      "approvalModeSnapshot": "priority_chain",
+      "priorityRank": 1,
+      "sequenceNo": 1,
+      "status": "open",
+      "availableActions": ["approve", "reject"],
+      "dueAt": "2026-03-14T12:00:00Z",
+      "escalationDueAt": null,
+      "createdAt": "2026-03-14T10:30:01Z"
+    },
+    {
+      "id": "task-uuid-2",
+      "workflowInstanceId": "workflow-instance-uuid-2",
+      "stepInstanceId": "step-instance-uuid-2",
+      "stepDefinitionId": "step-definition-uuid-2",
+      "stepCode": "cfo-approval",
+      "stepLabel": "CFO Approval",
+      "assignedUserId": "user-id-123",
+      "assignedRoleKey": null,
+      "assignedGroupKey": null,
+      "approvalModeSnapshot": "approve_any_one",
+      "priorityRank": null,
+      "sequenceNo": 2,
+      "status": "queued",
+      "availableActions": ["approve", "reject", "revert"],
+      "dueAt": null,
+      "escalationDueAt": "2026-03-14T14:00:00Z",
+      "createdAt": "2026-03-14T10:45:00Z"
+    }
+  ]
+}
+```
+
+## Task Status Values
+
+| Status | Description |
+|--------|-------------|
+| `queued` | Task is waiting for another task to complete (priority chain mode) |
+| `open` | Task is active and awaiting user action |
+| `claimed` | Task has been claimed by a user but not yet actioned |
+| `completed` | Task has been actioned (approved, rejected, or reverted) |
+| `expired` | Task deadline passed without action |
+| `cancelled` | Task was cancelled (e.g., another approver rejected in any-one mode) |
+
+<Note>
+Only tasks with `status = "open"` can be actioned by the assigned user.
+</Note>
+
+## Approval Modes
+
+The `approvalModeSnapshot` field records the assignment policy mode at task creation time:
+
+### priority_chain
+
+- Tasks are assigned in sequence based on `priorityRank` or `notification_order`
+- Only the first task is `open`; others are `queued`
+- When a task is approved, the next queued task opens automatically
+- When a task is rejected, the next queued task opens (workflow continues)
+- When all tasks in the chain are approved, the workflow advances
+
+### approve_any_one
+
+- All tasks are created as `open` simultaneously
+- The first user to approve advances the workflow
+- If a user rejects, the task completes but the workflow waits for another task to approve
+- All other tasks are cancelled when one is approved
+
+### approve_all
+
+- All tasks are created as `open` simultaneously
+- Every task must be approved for the workflow to advance
+- If any task is rejected, the workflow advances with reject action
+- Tasks are not cancelled until all have responded or one rejects
+
+### notify_all
+
+- All tasks are created as `open`
+- Used for informational purposes; any response advances the workflow
+
+<CodeGroup>
+```python Assignment Logic (API)
+# From runtime.py:364-442
+def _create_human_tasks(cursor, workflow_instance, step_instance, step_definition):
+    # Fetch assignment policy and associations
+    cursor.execute(
+        """
+        SELECT *
+        FROM workflow_step_assignment_policy
+        WHERE step_definition_id = %s
+        """,
+        (step_definition["id"],),
+    )
+    policy = cursor.fetchone()
+
+    cursor.execute(
+        """
+        SELECT *
+        FROM workflow_step_association
+        WHERE step_definition_id = %s AND is_active = true
+        ORDER BY notification_order NULLS LAST, priority NULLS LAST, created_at
+        """,
+        (step_definition["id"],),
+    )
+    associations = cursor.fetchall()
+
+    resolved_assignees = _resolve_task_assignees(cursor, associations)
+    available_actions = _available_actions(
+        cursor,
+        workflow_instance["workflow_version_id"],
+        step_definition["id"],
+        step_definition["allow_revert"],
+    )
+    approval_mode = policy["approval_mode"] if policy else "priority_chain"
+    reminder_seconds = policy["reminder_interval_seconds"] if policy else None
+
+    active_user_ids = []
+    now = _now()
+
+    for index, assignee in enumerate(resolved_assignees):
+        # Determine initial status based on approval mode
+        task_status = (
+            "open"
+            if approval_mode in {"approve_any_one", "approve_all", "notify_all"} or index == 0
+            else "queued"
+        )
+        
+        # Calculate escalation deadline for queued tasks
+        escalation_due_at = None
+        if task_status == "queued":
+            timeout_seconds = (
+                assignee["escalation_after_seconds"]
+                or (policy["escalation_timeout_seconds"] if policy else None)
+                or 86400
+            )
+            escalation_due_at = now + timedelta(seconds=timeout_seconds * index)
+
+        # Insert task
+        cursor.execute(
+            """
+            INSERT INTO human_task (
+                workflow_instance_id,
+                step_instance_id,
+                step_definition_id,
+                assigned_user_id,
+                assigned_role_key,
+                assigned_group_key,
+                approval_mode_snapshot,
+                priority_rank,
+                sequence_no,
+                status,
+                available_actions,
+                due_at,
+                escalation_due_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, assigned_user_id
+            """,
+            (
+                workflow_instance["id"],
+                step_instance["id"],
+                step_definition["id"],
+                assignee["assigned_user_id"],
+                assignee["assigned_role_key"],
+                assignee["assigned_group_key"],
+                approval_mode,
+                assignee["priority"],
+                index + 1,
+                task_status,
+                Json(available_actions),
+                due_at,
+                escalation_due_at,
+            ),
+        )
+```
+
+```typescript Task List UI (Frontend)
+// From runtime-console.tsx:260-267
+const loadTasks = useCallback(async () => {
+  const response = await authedFetch("/api/v1/me/tasks", { method: "GET" })
+  const payload = (await response.json()) as { items: HumanTask[] }
+  if (!response.ok) {
+    throw new Error("Unable to load tasks.")
+  }
+  setTasks(payload.items)
+}, [authedFetch])
+```
+</CodeGroup>
+
+## Available Actions
+
+The `availableActions` array indicates which actions the user can perform:
+
+- **`approve`**: Advance the workflow forward
+- **`reject`**: Transition to a rejection path or terminal state
+- **`revert`**: Return to a previous step (only if `allow_revert = true` on the step)
+- **`custom`**: Execute a custom transition defined in the workflow graph
+
+Actions are determined by the transitions defined in the workflow:
+
+```python
+# From runtime.py:289-302
+def _available_actions(cursor, workflow_version_id, from_step_definition_id, allow_revert: bool):
+    cursor.execute(
+        """
+        SELECT DISTINCT action_type
+        FROM workflow_transition_definition
+        WHERE workflow_version_id = %s AND from_step_definition_id = %s
+        ORDER BY action_type
+        """,
+        (workflow_version_id, from_step_definition_id),
+    )
+    actions = [row["action_type"] for row in cursor.fetchall()]
+    if not allow_revert:
+        actions = [action for action in actions if action != "revert"]
+    return actions
+```
+
+## Assignment Types
+
+Tasks can be assigned three ways:
+
+### Direct User Assignment
+
+```json
+{
+  "assignedUserId": "user-id-123",
+  "assignedRoleKey": null,
+  "assignedGroupKey": null
+}
+```
+
+Task is assigned to a specific user by UUID or email.
+
+### Role Assignment
+
+```json
+{
+  "assignedUserId": null,
+  "assignedRoleKey": "manager",
+  "assignedGroupKey": null
+}
+```
+
+Task is visible to all users with the `manager` role.
+
+### Group Assignment
+
+```json
+{
+  "assignedUserId": null,
+  "assignedRoleKey": null,
+  "assignedGroupKey": "finance-team"
+}
+```
+
+Task is visible to all users in the `finance-team` group.
+
+<Note>
+The `GET /api/v1/me/tasks` endpoint returns tasks where the current user matches `assigned_user_id`, `assigned.email`, or belongs to the `assigned_role_key`.
+</Note>
+
+## Task Deadlines
+
+### dueAt
+
+The `dueAt` timestamp indicates when a reminder should be sent. It's calculated based on the assignment policy's `reminder_interval_seconds`:
+
+```python
+due_at = (
+    now + timedelta(seconds=reminder_seconds)
+    if reminder_seconds and task_status == "open"
+    else None
+)
+```
+
+### escalationDueAt
+
+The `escalationDueAt` timestamp applies to queued tasks in priority chain mode. It tracks when the task should automatically open if the previous task is not actioned:
+
+```python
+if task_status == "queued":
+    timeout_seconds = (
+        assignee["escalation_after_seconds"]
+        or (policy["escalation_timeout_seconds"] if policy else None)
+        or 86400  # Default 24 hours
+    )
+    escalation_due_at = now + timedelta(seconds=timeout_seconds * index)
+```
+
+A background worker (not shown in runtime.py) processes these deadlines and transitions queued tasks to open.
+
+## UI Workflow
+
+The Operations page displays tasks in a table:
+
+```typescript
+// From runtime-console.tsx:643-731
+<TabsContent value="tasks">
+  <Card className="border-border/70">
+    <CardHeader>
+      <CardTitle>Human task inbox</CardTitle>
+      <CardDescription>
+        Approve, reject, or revert tasks with remarks and watch the workflow advance.
+      </CardDescription>
+    </CardHeader>
+    <CardContent>
+      {tasks.length > 0 ? (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Step</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Mode</TableHead>
+              <TableHead>Remark</TableHead>
+              <TableHead>Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {tasks.map((task) => (
+              <TableRow key={task.id}>
+                <TableCell>
+                  <div>
+                    <p className="font-medium">{task.stepLabel}</p>
+                    <p className="text-xs text-muted-foreground">{task.stepCode}</p>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant={task.status === "open" ? "secondary" : "outline"}>
+                    {task.status}
+                  </Badge>
+                </TableCell>
+                <TableCell>{task.approvalModeSnapshot}</TableCell>
+                <TableCell className="min-w-64">
+                  <Input
+                    onChange={(event) =>
+                      setTaskRemarks((current) => ({
+                        ...current,
+                        [task.id]: event.target.value,
+                      }))
+                    }
+                    placeholder="Add approval or rejection remark"
+                    value={taskRemarks[task.id] ?? ""}
+                  />
+                </TableCell>
+                <TableCell>
+                  <div className="flex flex-wrap gap-2">
+                    {task.availableActions.includes("approve") ? (
+                      <Button
+                        disabled={task.status !== "open" || isBusy}
+                        onClick={() => void submitTaskAction(task, "approve")}
+                        size="sm"
+                      >
+                        Approve
+                      </Button>
+                    ) : null}
+                    {task.availableActions.includes("reject") ? (
+                      <Button
+                        disabled={task.status !== "open" || isBusy}
+                        onClick={() => void submitTaskAction(task, "reject")}
+                        size="sm"
+                        variant="destructive"
+                      >
+                        Reject
+                      </Button>
+                    ) : null}
+                    {task.availableActions.includes("revert") ? (
+                      <Button
+                        disabled={task.status !== "open" || isBusy}
+                        onClick={() => void submitTaskAction(task, "revert")}
+                        size="sm"
+                        variant="outline"
+                      >
+                        Revert
+                      </Button>
+                    ) : null}
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      ) : (
+        <p className="text-sm text-muted-foreground">No tasks are currently assigned.</p>
+      )}
+    </CardContent>
+  </Card>
+</TabsContent>
+```
+
+## Related Endpoints
+
+- [Approving Tasks](/runtime/approvals#approve-action)
+- [Rejecting Tasks](/runtime/approvals#reject-action)
+- [Reverting Tasks](/runtime/approvals#revert-action)

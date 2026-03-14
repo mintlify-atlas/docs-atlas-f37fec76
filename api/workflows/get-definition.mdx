@@ -1,0 +1,517 @@
+---
+title: Get Workflow Definition
+api: GET /api/v1/workflow-definitions/{definition_id}
+---
+
+Retrieves the complete details of a workflow definition including its latest version, all steps, transitions, and configuration.
+
+## Authentication
+
+Requires Bearer token authentication.
+
+## Path Parameters
+
+<ParamField path="definition_id" type="UUID" required>
+  The unique identifier of the workflow definition to retrieve.
+</ParamField>
+
+## Response
+
+<ResponseField name="id" type="UUID">
+  Unique identifier for the workflow definition.
+</ResponseField>
+
+<ResponseField name="key" type="string">
+  Unique key for the workflow definition.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Human-readable name of the workflow.
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Detailed description of the workflow.
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Current status of the workflow definition. One of: `draft`, `active`, `archived`.
+</ResponseField>
+
+<ResponseField name="latestVersionId" type="UUID">
+  ID of the latest version of this workflow definition.
+</ResponseField>
+
+<ResponseField name="latestVersionNo" type="integer">
+  Version number of the latest version.
+</ResponseField>
+
+<ResponseField name="graphJson" type="object">
+  Structured representation of the workflow graph including workflow metadata, steps, and transitions.
+</ResponseField>
+
+<ResponseField name="builderLayout" type="object">
+  Visual layout information for the workflow builder UI, including node positions and viewport settings.
+</ResponseField>
+
+<ResponseField name="steps" type="array">
+  Array of step definitions.
+  
+  <ResponseField name="steps[].id" type="UUID">
+    Unique identifier for the step definition.
+  </ResponseField>
+  
+  <ResponseField name="steps[].stepCode" type="string">
+    Code identifier for the step.
+  </ResponseField>
+  
+  <ResponseField name="steps[].stepLabel" type="string">
+    Human-readable label for the step.
+  </ResponseField>
+  
+  <ResponseField name="steps[].description" type="string">
+    Description of the step.
+  </ResponseField>
+  
+  <ResponseField name="steps[].stepType" type="string">
+    Type of step: `start`, `end`, `human_task`, `system_task`, `subworkflow`, `decision`.
+  </ResponseField>
+  
+  <ResponseField name="steps[].sequenceHint" type="integer | null">
+    Suggested ordering for display.
+  </ResponseField>
+  
+  <ResponseField name="steps[].allowRevert" type="boolean">
+    Whether this step can be reverted to.
+  </ResponseField>
+  
+  <ResponseField name="steps[].remarkRequiredOnApprove" type="boolean">
+    Whether a remark is required when approving.
+  </ResponseField>
+  
+  <ResponseField name="steps[].remarkRequiredOnReject" type="boolean">
+    Whether a remark is required when rejecting.
+  </ResponseField>
+  
+  <ResponseField name="steps[].remarkRequiredOnRevert" type="boolean">
+    Whether a remark is required when reverting.
+  </ResponseField>
+  
+  <ResponseField name="steps[].maxVisitsPerInstance" type="integer | null">
+    Maximum visits per workflow instance (for loop prevention).
+  </ResponseField>
+  
+  <ResponseField name="steps[].formSchema" type="object">
+    JSON Schema for the step's form.
+  </ResponseField>
+  
+  <ResponseField name="steps[].config" type="object">
+    Additional configuration data.
+  </ResponseField>
+  
+  <ResponseField name="steps[].isTerminal" type="boolean">
+    Whether this step marks workflow completion.
+  </ResponseField>
+  
+  <ResponseField name="steps[].notificationTemplate" type="object | null">
+    Notification template configuration.
+    
+    <ResponseField name="steps[].notificationTemplate.id" type="UUID">
+      Template ID.
+    </ResponseField>
+    
+    <ResponseField name="steps[].notificationTemplate.titleTemplate" type="string">
+      Title template with variable support.
+    </ResponseField>
+    
+    <ResponseField name="steps[].notificationTemplate.bodyTemplate" type="string">
+      Body template with variable support.
+    </ResponseField>
+    
+    <ResponseField name="steps[].notificationTemplate.allowActorOverride" type="boolean">
+      Whether actor can customize notifications.
+    </ResponseField>
+  </ResponseField>
+  
+  <ResponseField name="steps[].subworkflowMapping" type="object | null">
+    Subworkflow configuration (if stepType is `subworkflow`).
+    
+    <ResponseField name="steps[].subworkflowMapping.id" type="UUID">
+      Mapping ID.
+    </ResponseField>
+    
+    <ResponseField name="steps[].subworkflowMapping.childWorkflowDefinitionId" type="UUID | null">
+      Child workflow definition ID.
+    </ResponseField>
+    
+    <ResponseField name="steps[].subworkflowMapping.childWorkflowVersionId" type="UUID | null">
+      Specific child workflow version ID.
+    </ResponseField>
+    
+    <ResponseField name="steps[].subworkflowMapping.triggerMode" type="string">
+      Trigger mode: `sync_wait` or `async_wait`.
+    </ResponseField>
+    
+    <ResponseField name="steps[].subworkflowMapping.inputMapping" type="object">
+      Data mapping from parent to child.
+    </ResponseField>
+    
+    <ResponseField name="steps[].subworkflowMapping.outputMapping" type="object">
+      Data mapping from child to parent.
+    </ResponseField>
+    
+    <ResponseField name="steps[].subworkflowMapping.completionAction" type="string">
+      Action on subworkflow completion.
+    </ResponseField>
+    
+    <ResponseField name="steps[].subworkflowMapping.failureAction" type="string">
+      Action on subworkflow failure.
+    </ResponseField>
+  </ResponseField>
+  
+  <ResponseField name="steps[].assignmentPolicy" type="object | null">
+    Task assignment and approval policy.
+    
+    <ResponseField name="steps[].assignmentPolicy.id" type="UUID">
+      Policy ID.
+    </ResponseField>
+    
+    <ResponseField name="steps[].assignmentPolicy.approvalMode" type="string">
+      Approval mode: `priority_chain`, `approve_any_one`, `approve_all`, `notify_all`.
+    </ResponseField>
+    
+    <ResponseField name="steps[].assignmentPolicy.requiredApprovalsCount" type="integer | null">
+      Required number of approvals.
+    </ResponseField>
+    
+    <ResponseField name="steps[].assignmentPolicy.priorityEscalationEnabled" type="boolean">
+      Whether priority escalation is enabled.
+    </ResponseField>
+    
+    <ResponseField name="steps[].assignmentPolicy.escalationTimeoutSeconds" type="integer | null">
+      Timeout before escalation.
+    </ResponseField>
+    
+    <ResponseField name="steps[].assignmentPolicy.reminderIntervalSeconds" type="integer | null">
+      Interval for reminder notifications.
+    </ResponseField>
+    
+    <ResponseField name="steps[].assignmentPolicy.maxEscalationCount" type="integer | null">
+      Maximum escalation levels.
+    </ResponseField>
+  </ResponseField>
+  
+  <ResponseField name="steps[].associations" type="array">
+    Users, roles, or groups assigned to this step.
+    
+    <ResponseField name="steps[].associations[].id" type="UUID">
+      Association ID.
+    </ResponseField>
+    
+    <ResponseField name="steps[].associations[].associationType" type="string">
+      Type: `user`, `role`, `group`, `sql_rule`.
+    </ResponseField>
+    
+    <ResponseField name="steps[].associations[].associationValue" type="string">
+      The user ID, role name, group name, or SQL expression.
+    </ResponseField>
+    
+    <ResponseField name="steps[].associations[].canApprove" type="boolean">
+      Can approve permission.
+    </ResponseField>
+    
+    <ResponseField name="steps[].associations[].canReject" type="boolean">
+      Can reject permission.
+    </ResponseField>
+    
+    <ResponseField name="steps[].associations[].canRevert" type="boolean">
+      Can revert permission.
+    </ResponseField>
+    
+    <ResponseField name="steps[].associations[].priority" type="integer | null">
+      Priority level.
+    </ResponseField>
+    
+    <ResponseField name="steps[].associations[].notificationOrder" type="integer | null">
+      Notification order.
+    </ResponseField>
+    
+    <ResponseField name="steps[].associations[].escalationAfterSeconds" type="integer | null">
+      Escalation timeout for this association.
+    </ResponseField>
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="transitions" type="array">
+  Array of transition definitions.
+  
+  <ResponseField name="transitions[].id" type="UUID">
+    Unique identifier for the transition.
+  </ResponseField>
+  
+  <ResponseField name="transitions[].fromStepCode" type="string">
+    Source step code.
+  </ResponseField>
+  
+  <ResponseField name="transitions[].toStepCode" type="string | null">
+    Target step code (null for terminal transitions).
+  </ResponseField>
+  
+  <ResponseField name="transitions[].actionType" type="string">
+    Action type: `approve`, `reject`, `revert`, `custom`.
+  </ResponseField>
+  
+  <ResponseField name="transitions[].actionCode" type="string | null">
+    Custom action code (for custom actions).
+  </ResponseField>
+  
+  <ResponseField name="transitions[].transitionLabel" type="string">
+    Human-readable label.
+  </ResponseField>
+  
+  <ResponseField name="transitions[].description" type="string">
+    Transition description.
+  </ResponseField>
+  
+  <ResponseField name="transitions[].conditionExpression" type="string | null">
+    Optional condition expression.
+  </ResponseField>
+  
+  <ResponseField name="transitions[].priority" type="integer">
+    Evaluation priority.
+  </ResponseField>
+</ResponseField>
+
+## Example Request
+
+<CodeGroup>
+
+```bash cURL
+curl -X GET https://api.example.com/api/v1/workflow-definitions/9a7b8c9d-1234-5678-90ab-cdef12345678 \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+```javascript JavaScript
+const response = await fetch(
+  'https://api.example.com/api/v1/workflow-definitions/9a7b8c9d-1234-5678-90ab-cdef12345678',
+  {
+    headers: {
+      'Authorization': 'Bearer YOUR_TOKEN'
+    }
+  }
+);
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.get(
+    'https://api.example.com/api/v1/workflow-definitions/9a7b8c9d-1234-5678-90ab-cdef12345678',
+    headers={
+        'Authorization': 'Bearer YOUR_TOKEN'
+    }
+)
+
+data = response.json()
+```
+
+</CodeGroup>
+
+## Example Response
+
+```json
+{
+  "id": "9a7b8c9d-1234-5678-90ab-cdef12345678",
+  "key": "expense-approval",
+  "name": "Expense Approval Workflow",
+  "description": "Multi-level approval workflow for expense requests",
+  "status": "active",
+  "latestVersionId": "1a2b3c4d-5678-90ab-cdef-123456789012",
+  "latestVersionNo": 2,
+  "graphJson": {
+    "workflow": {
+      "key": "expense-approval",
+      "name": "Expense Approval Workflow",
+      "description": "Multi-level approval workflow for expense requests"
+    },
+    "steps": [
+      {
+        "stepCode": "start",
+        "stepLabel": "Start",
+        "stepType": "start",
+        "sequenceHint": 1
+      },
+      {
+        "stepCode": "manager_review",
+        "stepLabel": "Manager Review",
+        "stepType": "human_task",
+        "sequenceHint": 2
+      }
+    ],
+    "transitions": [
+      {
+        "fromStepCode": "start",
+        "toStepCode": "manager_review",
+        "actionType": "approve",
+        "transitionLabel": "Submit for Review"
+      }
+    ]
+  },
+  "builderLayout": {
+    "nodes": [
+      {
+        "id": "start",
+        "position": {"x": 0, "y": 120},
+        "data": {"label": "Start", "stepType": "start"}
+      },
+      {
+        "id": "manager_review",
+        "position": {"x": 220, "y": 40},
+        "data": {"label": "Manager Review", "stepType": "human_task"}
+      }
+    ],
+    "edges": [
+      {
+        "id": "start-approve-manager_review",
+        "source": "start",
+        "target": "manager_review",
+        "label": "Submit for Review"
+      }
+    ],
+    "viewport": {"x": 0, "y": 0, "zoom": 1}
+  },
+  "steps": [
+    {
+      "id": "step-uuid-1",
+      "stepCode": "start",
+      "stepLabel": "Start",
+      "description": "",
+      "stepType": "start",
+      "sequenceHint": 1,
+      "allowRevert": true,
+      "remarkRequiredOnApprove": false,
+      "remarkRequiredOnReject": false,
+      "remarkRequiredOnRevert": false,
+      "maxVisitsPerInstance": null,
+      "formSchema": {},
+      "config": {},
+      "isTerminal": false,
+      "notificationTemplate": null,
+      "subworkflowMapping": null,
+      "assignmentPolicy": {
+        "id": "policy-uuid-1",
+        "approvalMode": "priority_chain",
+        "requiredApprovalsCount": null,
+        "priorityEscalationEnabled": false,
+        "escalationTimeoutSeconds": null,
+        "reminderIntervalSeconds": null,
+        "maxEscalationCount": null
+      },
+      "associations": []
+    },
+    {
+      "id": "step-uuid-2",
+      "stepCode": "manager_review",
+      "stepLabel": "Manager Review",
+      "description": "Manager reviews and approves expense request",
+      "stepType": "human_task",
+      "sequenceHint": 2,
+      "allowRevert": true,
+      "remarkRequiredOnApprove": false,
+      "remarkRequiredOnReject": true,
+      "remarkRequiredOnRevert": false,
+      "maxVisitsPerInstance": null,
+      "formSchema": {
+        "type": "object",
+        "properties": {
+          "approvedAmount": {
+            "type": "number",
+            "title": "Approved Amount"
+          }
+        }
+      },
+      "config": {},
+      "isTerminal": false,
+      "notificationTemplate": {
+        "id": "notif-uuid-1",
+        "titleTemplate": "New Expense Request: {{stepLabel}}",
+        "bodyTemplate": "You have been assigned to review an expense request.",
+        "allowActorOverride": true
+      },
+      "subworkflowMapping": null,
+      "assignmentPolicy": {
+        "id": "policy-uuid-2",
+        "approvalMode": "approve_any_one",
+        "requiredApprovalsCount": null,
+        "priorityEscalationEnabled": false,
+        "escalationTimeoutSeconds": null,
+        "reminderIntervalSeconds": null,
+        "maxEscalationCount": null
+      },
+      "associations": [
+        {
+          "id": "assoc-uuid-1",
+          "associationType": "role",
+          "associationValue": "manager",
+          "canApprove": true,
+          "canReject": true,
+          "canRevert": true,
+          "priority": null,
+          "notificationOrder": null,
+          "escalationAfterSeconds": null
+        }
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "id": "trans-uuid-1",
+      "fromStepCode": "start",
+      "toStepCode": "manager_review",
+      "actionType": "approve",
+      "actionCode": null,
+      "transitionLabel": "Submit for Review",
+      "description": "Submits expense request for manager review",
+      "conditionExpression": null,
+      "priority": 0
+    },
+    {
+      "id": "trans-uuid-2",
+      "fromStepCode": "manager_review",
+      "toStepCode": "end",
+      "actionType": "approve",
+      "actionCode": null,
+      "transitionLabel": "Approve",
+      "description": "Manager approves the expense",
+      "conditionExpression": null,
+      "priority": 0
+    },
+    {
+      "id": "trans-uuid-3",
+      "fromStepCode": "manager_review",
+      "toStepCode": null,
+      "actionType": "reject",
+      "actionCode": null,
+      "transitionLabel": "Reject",
+      "description": "Manager rejects the expense",
+      "conditionExpression": null,
+      "priority": 0
+    }
+  ]
+}
+```
+
+## Status Codes
+
+<ResponseField name="200" type="OK">
+  Workflow definition retrieved successfully.
+</ResponseField>
+
+<ResponseField name="401" type="Unauthorized">
+  Missing or invalid authentication token.
+</ResponseField>
+
+<ResponseField name="404" type="Not Found">
+  Workflow definition not found.
+</ResponseField>

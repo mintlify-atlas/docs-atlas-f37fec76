@@ -1,0 +1,273 @@
+---
+title: GET /api/v1/me
+description: Retrieve authenticated user information from JWT token
+api: GET http://localhost:8000/api/v1/me
+---
+
+Returns information about the currently authenticated user based on the JWT token provided in the request.
+
+## Authentication
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token containing a valid JWT from Better Auth.
+  
+  **Format**: `Bearer <jwt_token>`
+</ParamField>
+
+## Request
+
+<CodeGroup>
+```bash cURL
+curl http://localhost:8000/api/v1/me \
+  -H "Authorization: Bearer eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9..."
+```
+
+```javascript JavaScript (Fetch)
+const response = await fetch('http://localhost:8000/api/v1/me', {
+  headers: {
+    'Authorization': `Bearer ${jwtToken}`
+  }
+});
+
+const user = await response.json();
+console.log(user);
+```
+
+```python Python (requests)
+import requests
+
+headers = {
+    'Authorization': f'Bearer {jwt_token}'
+}
+
+response = requests.get(
+    'http://localhost:8000/api/v1/me',
+    headers=headers
+)
+
+user = response.json()
+print(user)
+```
+
+```typescript TypeScript
+interface UserInfo {
+  userId: string;
+  email: string | null;
+  claims: Record<string, any>;
+}
+
+async function getCurrentUser(token: string): Promise<UserInfo> {
+  const response = await fetch('http://localhost:8000/api/v1/me', {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Authentication failed: ${response.status}`);
+  }
+  
+  return response.json();
+}
+```
+</CodeGroup>
+
+## Response
+
+<ResponseField name="userId" type="string" required>
+  The unique identifier for the authenticated user. Extracted from the JWT `sub` claim.
+</ResponseField>
+
+<ResponseField name="email" type="string | null" required>
+  The user's email address. Extracted from the JWT `email` claim. May be `null` if not present in the token.
+</ResponseField>
+
+<ResponseField name="claims" type="object" required>
+  The complete JWT payload containing all claims from the token. This includes standard claims and any custom claims added by Better Auth.
+  
+  <Expandable title="Common Claims">
+    <ResponseField name="sub" type="string">
+      Subject - the user ID
+    </ResponseField>
+    
+    <ResponseField name="email" type="string">
+      User's email address
+    </ResponseField>
+    
+    <ResponseField name="iss" type="string">
+      Issuer - the Better Auth URL that issued the token
+    </ResponseField>
+    
+    <ResponseField name="aud" type="string">
+      Audience - the intended recipient of the token
+    </ResponseField>
+    
+    <ResponseField name="iat" type="number">
+      Issued At - timestamp when the token was created
+    </ResponseField>
+    
+    <ResponseField name="exp" type="number">
+      Expiration Time - timestamp when the token expires
+    </ResponseField>
+    
+    <ResponseField name="role" type="string">
+      User's role (if configured in Better Auth user fields)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Success Response
+
+<CodeGroup>
+```json Example Response
+{
+  "userId": "cm5xqp8yz0000v5q7d8h3j9k2",
+  "email": "admin@example.com",
+  "claims": {
+    "sub": "cm5xqp8yz0000v5q7d8h3j9k2",
+    "email": "admin@example.com",
+    "iss": "http://localhost:3000",
+    "aud": "http://localhost:3000",
+    "iat": 1709654400,
+    "exp": 1709740800,
+    "role": "admin",
+    "displayName": "Admin User",
+    "isTestUser": true
+  }
+}
+```
+
+```json Minimal Response
+{
+  "userId": "cm5xqp8yz0000v5q7d8h3j9k2",
+  "email": null,
+  "claims": {
+    "sub": "cm5xqp8yz0000v5q7d8h3j9k2",
+    "iss": "http://localhost:3000",
+    "aud": "http://localhost:3000",
+    "iat": 1709654400,
+    "exp": 1709740800
+  }
+}
+```
+</CodeGroup>
+
+## Error Responses
+
+### 401 Unauthorized - Missing Token
+
+Returned when the `Authorization` header is missing or does not contain a Bearer token.
+
+```json
+{
+  "detail": "Missing bearer token."
+}
+```
+
+### 401 Unauthorized - Invalid Token
+
+Returned when the JWT token is invalid, expired, or cannot be verified.
+
+```json
+{
+  "detail": "Invalid Better Auth token: Signature has expired"
+}
+```
+
+Common causes:
+- Expired token (check `exp` claim)
+- Invalid signature (token tampered with or signed with wrong key)
+- Token from different issuer (issuer mismatch)
+- Unsupported algorithm (must be EdDSA, RS256, or ES256)
+
+### 401 Unauthorized - Missing Subject
+
+Returned when the JWT token is valid but missing the required `sub` claim.
+
+```json
+{
+  "detail": "Better Auth token is missing the subject claim."
+}
+```
+
+## Implementation Details
+
+This endpoint is implemented in `apps/api/src/api/main.py:52-57` and uses the `get_current_user` dependency from `apps/api/src/api/auth.py`.
+
+### Authentication Flow
+
+1. FastAPI extracts the Bearer token from the `Authorization` header
+2. The token is validated against Better Auth's JWKS endpoint at `/api/auth/jwks`
+3. JWT signature is verified using the public key from JWKS
+4. Claims are validated (audience, issuer, subject)
+5. An `AuthenticatedUser` object is created with user ID, email, and full payload
+6. The endpoint returns the user information as JSON
+
+### Source Code Reference
+
+```python apps/api/src/api/main.py:52-57
+@app.get("/api/v1/me", tags=["auth"])
+def who_am_i(user: AuthenticatedUser = Depends(get_current_user)) -> dict:
+    return {
+        "userId": user.user_id,
+        "email": user.email,
+        "claims": user.payload,
+    }
+```
+
+## Use Cases
+
+### Verify Authentication Status
+
+Check if the current JWT token is valid and get user information:
+
+```typescript
+async function isAuthenticated(token: string): Promise<boolean> {
+  try {
+    const response = await fetch('http://localhost:8000/api/v1/me', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+```
+
+### Extract User Context
+
+Get user information to display in the UI or for authorization checks:
+
+```typescript
+const userInfo = await getCurrentUser(token);
+
+// Check user role
+if (userInfo.claims.role === 'admin') {
+  // Show admin features
+}
+
+// Display user info
+console.log(`Logged in as: ${userInfo.email}`);
+console.log(`User ID: ${userInfo.userId}`);
+```
+
+### Debug Token Claims
+
+Inspect the full JWT payload to debug authentication issues:
+
+```bash
+curl http://localhost:8000/api/v1/me \
+  -H "Authorization: Bearer $TOKEN" | jq '.claims'
+```
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Authentication Overview" icon="shield" href="/api/auth/overview">
+    Learn about the Better Auth JWT authentication system
+  </Card>
+  
+  <Card title="Better Auth Docs" icon="book" href="https://www.better-auth.com/">
+    Official Better Auth documentation
+  </Card>
+</CardGroup>

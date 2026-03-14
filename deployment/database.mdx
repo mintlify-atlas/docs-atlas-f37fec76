@@ -1,0 +1,521 @@
+---
+title: 'Database Setup'
+description: 'PostgreSQL database configuration, schema initialization, and maintenance'
+---
+
+## Overview
+
+The Workflow Engine Platform uses **PostgreSQL** hosted on **Neon** as its primary data store. The database contains all workflow definitions, runtime state, user data, and event tracking.
+
+<Note>
+  The platform uses Neon's serverless PostgreSQL, which automatically scales and manages backups. Local PostgreSQL is not required.
+</Note>
+
+## Database Architecture
+
+### Core Components
+
+The database schema consists of several functional areas:
+
+<CardGroup cols={2}>
+  <Card title="Authentication" icon="lock">
+    - User accounts and sessions
+    - OAuth provider data
+    - JWT key storage
+    - Email verification
+  </Card>
+  
+  <Card title="Workflow Definitions" icon="diagram-project">
+    - Workflow templates
+    - Versioned definitions
+    - Step configurations
+    - Transition rules
+  </Card>
+  
+  <Card title="Workflow Runtime" icon="gears">
+    - Active workflow instances
+    - Step execution state
+    - Human tasks and assignments
+    - Action history
+  </Card>
+  
+  <Card title="Event Management" icon="message">
+    - Outbox event pattern
+    - Message deduplication
+    - Retry handling
+    - Dead letter queue
+  </Card>
+</CardGroup>
+
+## Initial Setup
+
+### Creating the Database
+
+<Steps>
+  <Step title="Create Neon Project">
+    1. Sign up at [neon.tech](https://neon.tech)
+    2. Create a new project
+    3. Select a region close to your application
+    4. Note the connection string provided
+  </Step>
+
+  <Step title="Configure Connection">
+    Add the connection string to both environment files:
+    
+    **Web** (`apps/web/.env.local`):
+    ```bash
+    DATABASE_URL=postgresql://user:pass@host/neondb?sslmode=require
+    ```
+    
+    **API** (`apps/api/.env`):
+    ```bash
+    WORKFLOW_DATABASE_URL=postgresql://user:pass@host/neondb?sslmode=require
+    ```
+    
+    <Warning>
+      Both variables must point to the **same database**.
+    </Warning>
+  </Step>
+
+  <Step title="Bootstrap Schema">
+    Run the bootstrap script to create all tables:
+    
+    ```bash
+    pnpm bootstrap:db
+    ```
+    
+    This executes the foundation schema file:
+    ```
+    infra/postgres/init/01_foundation.sql
+    ```
+  </Step>
+
+  <Step title="Verify Installation">
+    Check that tables were created:
+    
+    ```bash
+    psql $DATABASE_URL -c "\dt"
+    ```
+    
+    You should see 20+ tables including:
+    - `user`, `session`, `account`
+    - `workflow_definition`, `workflow_instance`
+    - `human_task`, `notification`
+    - `outbox_event`, `processed_message`
+  </Step>
+</Steps>
+
+## Schema Components
+
+### Authentication Tables
+
+<ParamField path="user" type="table">
+  Stores user accounts with Better Auth integration.
+  
+  **Key columns:**
+  - `id` (text) - Primary key
+  - `email` (text) - Unique email address
+  - `role` (text) - User role (user, admin, etc.)
+  - `isTestUser` (boolean) - Flag for seeded test accounts
+</ParamField>
+
+<ParamField path="session" type="table">
+  Active user sessions with token management.
+  
+  **Key columns:**
+  - `token` (text) - Session token (unique)
+  - `userId` (text) - Foreign key to user
+  - `expiresAt` (timestamptz) - Expiration timestamp
+</ParamField>
+
+<ParamField path="account" type="table">
+  OAuth provider accounts and credentials.
+  
+  **Key columns:**
+  - `providerId` (text) - OAuth provider name
+  - `accountId` (text) - Provider's user ID
+  - `accessToken`, `refreshToken` - OAuth tokens
+</ParamField>
+
+### Workflow Definition Tables
+
+<ParamField path="workflow_definition" type="table">
+  Top-level workflow templates.
+  
+  **Key columns:**
+  - `id` (uuid) - Primary key
+  - `key` (text) - Unique workflow identifier
+  - `name` (text) - Display name
+  - `status` (text) - draft, published, archived
+</ParamField>
+
+<ParamField path="workflow_definition_version" type="table">
+  Versioned workflow definitions (supports rollback and testing).
+  
+  **Key columns:**
+  - `workflow_definition_id` (uuid) - Parent workflow
+  - `version_no` (integer) - Sequential version number
+  - `is_published` (boolean) - Whether this version is active
+  - `definition_snapshot` (jsonb) - Complete workflow config
+  - `graph_json` (jsonb) - Visual graph representation
+</ParamField>
+
+<ParamField path="workflow_step_definition" type="table">
+  Individual steps within a workflow version.
+  
+  **Key columns:**
+  - `step_code` (text) - Unique step identifier
+  - `step_type` (text) - human_task, system_task, etc.
+  - `form_schema` (jsonb) - Dynamic form configuration
+  - `is_terminal` (boolean) - Whether step ends workflow
+</ParamField>
+
+<ParamField path="workflow_step_association" type="table">
+  User/role/group assignments to workflow steps.
+  
+  **Key columns:**
+  - `association_type` (text) - user, role, or group
+  - `association_value` (text) - User ID, role name, etc.
+  - `priority` (integer) - Priority chain ordering
+  - `escalation_after_seconds` (integer) - Escalation timeout
+</ParamField>
+
+### Workflow Runtime Tables
+
+<ParamField path="workflow_instance" type="table">
+  Active workflow executions.
+  
+  **Key columns:**
+  - `id` (uuid) - Primary key
+  - `workflow_version_id` (uuid) - Definition being executed
+  - `status` (text) - running, completed, failed, suspended
+  - `current_step_instance_id` (uuid) - Active step
+  - `lock_version` (integer) - Optimistic locking
+</ParamField>
+
+<ParamField path="step_instance" type="table">
+  Execution state for each step in a workflow.
+  
+  **Key columns:**
+  - `workflow_instance_id` (uuid) - Parent workflow
+  - `step_definition_id` (uuid) - Step template
+  - `status` (text) - pending, active, completed, failed
+  - `visit_count` (integer) - Tracks loops/retries
+  - `result_payload` (jsonb) - Step output data
+</ParamField>
+
+<ParamField path="human_task" type="table">
+  Tasks requiring human approval or input.
+  
+  **Key columns:**
+  - `step_instance_id` (uuid) - Associated step
+  - `assigned_user_id` (text) - Current assignee
+  - `status` (text) - open, claimed, completed, expired, queued
+  - `approval_mode_snapshot` (text) - priority_chain, parallel, etc.
+  - `sequence_no` (integer) - Priority chain position
+  - `escalation_due_at` (timestamptz) - When to escalate
+</ParamField>
+
+### Event Management Tables
+
+<ParamField path="outbox_event" type="table">
+  Transactional outbox pattern for reliable event publishing.
+  
+  **Key columns:**
+  - `aggregate_type` (text) - Entity type (workflow_instance, human_task)
+  - `aggregate_id` (uuid) - Entity ID
+  - `event_type` (text) - Event name (routing key)
+  - `payload` (jsonb) - Event data
+  - `status` (text) - pending, processing, published, retry_scheduled, dead_letter
+  - `retry_count` (integer) - Number of publish attempts
+  - `max_attempts` (integer) - Retry limit
+  - `claimed_by` (text) - Worker that claimed this event
+  
+  **Indexes:**
+  - `idx_outbox_event_ready` - Efficiently finds pending events
+  - `idx_outbox_event_processing` - Tracks claimed events
+  - `idx_outbox_event_aggregate` - Queries by entity
+</ParamField>
+
+<ParamField path="processed_message" type="table">
+  Deduplication tracking for consumed messages.
+  
+  **Key columns:**
+  - `consumer_name` (text) - Name of consuming service
+  - `message_id` (uuid) - Unique message identifier
+  - `processed_at` (timestamptz) - Processing timestamp
+  
+  **Primary Key:** `(consumer_name, message_id)`
+</ParamField>
+
+## Bootstrap Script
+
+The bootstrap script (`apps/api/scripts/bootstrap_neon.py`) applies the foundation schema:
+
+```python
+from pathlib import Path
+from psycopg import connect
+from api.config import get_settings
+
+def main() -> None:
+    settings = get_settings()
+    sql_path = (
+        Path(__file__).resolve().parents[3] 
+        / "infra" / "postgres" / "init" / "01_foundation.sql"
+    )
+    sql = sql_path.read_text(encoding="utf-8")
+
+    with connect(settings.workflow_database_url, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(sql)
+
+    print(f"Applied foundation schema to Neon using {sql_path}.")
+```
+
+**Usage:**
+```bash
+pnpm bootstrap:db
+```
+
+This command:
+1. Reads `WORKFLOW_DATABASE_URL` from `apps/api/.env`
+2. Executes the SQL file using `psycopg` (PostgreSQL adapter)
+3. Creates all tables with `IF NOT EXISTS` guards (safe to rerun)
+
+<Note>
+  The bootstrap script is **idempotent** - it can be run multiple times safely.
+</Note>
+
+## Database Maintenance
+
+### Monitoring Event Processing
+
+Check outbox event status:
+
+```sql
+SELECT 
+  status, 
+  COUNT(*) as count,
+  MIN(created_at) as oldest,
+  MAX(created_at) as newest
+FROM outbox_event
+GROUP BY status
+ORDER BY count DESC;
+```
+
+### Dead Letter Queue
+
+Find events that exhausted retry attempts:
+
+```sql
+SELECT 
+  id,
+  event_type,
+  aggregate_type,
+  aggregate_id,
+  retry_count,
+  last_error,
+  created_at
+FROM outbox_event
+WHERE status = 'dead_letter'
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+### Reprocessing Failed Events
+
+Reset dead letter events for retry:
+
+```sql
+UPDATE outbox_event
+SET 
+  status = 'pending',
+  available_at = now(),
+  retry_count = 0,
+  claimed_at = NULL,
+  claimed_by = NULL
+WHERE status = 'dead_letter'
+  AND id = '<specific-event-id>';
+```
+
+<Warning>
+  Only retry events after investigating and fixing the root cause.
+</Warning>
+
+### Cleanup Old Data
+
+Archive published events older than 30 days:
+
+```sql
+DELETE FROM outbox_event
+WHERE status = 'published'
+  AND published_at < now() - interval '30 days';
+```
+
+Clean up old processed message records:
+
+```sql
+DELETE FROM processed_message
+WHERE processed_at < now() - interval '90 days';
+```
+
+## Indexes and Performance
+
+### Critical Indexes
+
+The schema includes optimized indexes for common queries:
+
+<CodeGroup>
+```sql Outbox Events
+-- Find pending/retry events efficiently
+CREATE INDEX idx_outbox_event_ready
+    ON outbox_event (available_at, created_at)
+    WHERE status IN ('pending', 'retry_scheduled');
+
+-- Track processing events
+CREATE INDEX idx_outbox_event_processing
+    ON outbox_event (claimed_at)
+    WHERE status = 'processing';
+```
+
+```sql Priority Tasks
+-- Find tasks ready for escalation
+CREATE INDEX idx_human_task_priority_due
+    ON human_task (escalation_due_at, step_instance_id, sequence_no)
+    WHERE status = 'queued'
+      AND approval_mode_snapshot = 'priority_chain'
+      AND escalation_due_at IS NOT NULL;
+
+-- Quick lookup by step and status
+CREATE INDEX idx_human_task_step_status
+    ON human_task (step_instance_id, status);
+```
+</CodeGroup>
+
+### Query Performance Tips
+
+<AccordionGroup>
+  <Accordion title="Use Partial Indexes">
+    The outbox and task indexes use `WHERE` clauses to only index relevant rows, reducing index size and improving performance.
+  </Accordion>
+  
+  <Accordion title="Optimize Batch Sizes">
+    The `OUTBOX_BATCH_SIZE` and `PRIORITY_RELEASE_BATCH_SIZE` variables control how many rows are processed at once. Tune based on your workload.
+  </Accordion>
+  
+  <Accordion title="Monitor Lock Contention">
+    Workers use `FOR UPDATE SKIP LOCKED` to avoid blocking. Monitor with:
+    ```sql
+    SELECT * FROM pg_stat_activity 
+    WHERE wait_event_type = 'Lock';
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Backup and Recovery
+
+### Neon Automatic Backups
+
+Neon provides:
+- **Point-in-time recovery** up to 7 days (free tier) or 30 days (paid)
+- **Automatic snapshots** every 24 hours
+- **Branch-based testing** - create isolated database copies
+
+### Manual Backup
+
+Export the entire database:
+
+```bash
+pg_dump $DATABASE_URL > backup-$(date +%Y%m%d).sql
+```
+
+Backup specific tables:
+
+```bash
+pg_dump $DATABASE_URL \
+  -t workflow_definition \
+  -t workflow_definition_version \
+  -t workflow_step_definition \
+  > workflow-definitions-backup.sql
+```
+
+### Restore from Backup
+
+```bash
+psql $DATABASE_URL < backup-20260314.sql
+```
+
+<Warning>
+  Test restores in a separate Neon branch before applying to production.
+</Warning>
+
+## Production Considerations
+
+<AccordionGroup>
+  <Accordion title="Connection Pooling">
+    Neon has built-in connection pooling. For additional control, use PgBouncer:
+    
+    - Configure max connections in Neon dashboard
+    - Use `psycopg` connection pools in Python
+    - Monitor connection usage: `SELECT count(*) FROM pg_stat_activity;`
+  </Accordion>
+  
+  <Accordion title="Schema Migrations">
+    For schema changes after initial deployment:
+    
+    1. Create migration SQL files (e.g., `02_add_feature.sql`)
+    2. Test in a Neon branch first
+    3. Apply during maintenance window
+    4. Use transactions for rollback safety:
+       ```sql
+       BEGIN;
+       -- migration statements
+       COMMIT; -- or ROLLBACK if issues
+       ```
+  </Accordion>
+  
+  <Accordion title="Monitoring">
+    Track key metrics:
+    
+    - **Outbox backlog:** `SELECT COUNT(*) FROM outbox_event WHERE status != 'published'`
+    - **Active workflows:** `SELECT COUNT(*) FROM workflow_instance WHERE status = 'running'`
+    - **Open tasks:** `SELECT COUNT(*) FROM human_task WHERE status IN ('open', 'claimed')`
+    - **Database size:** Check Neon dashboard
+  </Accordion>
+  
+  <Accordion title="SSL/TLS">
+    Neon requires SSL connections. The connection string must include:
+    ```
+    ?sslmode=require
+    ```
+    
+    For additional security, use `sslmode=verify-full` with certificate verification.
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Connection Refused">
+    - Verify `sslmode=require` is in connection string
+    - Check Neon IP allowlist settings
+    - Ensure database is not suspended (Neon auto-suspends after inactivity)
+  </Accordion>
+  
+  <Accordion title="Deadlocks">
+    Workers use `SKIP LOCKED` to prevent deadlocks, but if you see them:
+    ```sql
+    SELECT * FROM pg_stat_database_conflicts;
+    ```
+    
+    Reduce batch sizes or increase poll intervals.
+  </Accordion>
+  
+  <Accordion title="High Event Backlog">
+    If outbox events accumulate:
+    1. Check RabbitMQ connectivity
+    2. Verify workers are running: `docker ps`
+    3. Check worker logs: `docker logs workflow-engine-rabbitmq`
+    4. Increase `OUTBOX_BATCH_SIZE` or add more worker instances
+  </Accordion>
+</AccordionGroup>

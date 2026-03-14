@@ -1,0 +1,262 @@
+---
+title: Revert Task
+api: POST /api/v1/human-tasks/{task_id}/revert
+---
+
+Reverts a human task, sending the workflow back to a previous step. This action is only available if the step definition has `allowRevert` enabled and a revert transition is configured.
+
+## Authentication
+
+Requires Bearer token authentication. The authenticated user must be assigned to the task.
+
+## Path Parameters
+
+<ParamField path="task_id" type="UUID" required>
+  The unique identifier of the task to revert.
+</ParamField>
+
+## Request Body
+
+<ParamField body="remark" type="string">
+  Optional comment explaining why the workflow is being reverted. Required if the step definition has `remarkRequiredOnRevert` set to true.
+</ParamField>
+
+<ParamField body="payload" type="object" default="{}">
+  Optional additional data to include with the revert action. This data becomes available in the workflow context.
+</ParamField>
+
+<ParamField body="actionCode" type="string">
+  Optional custom action code. Not typically needed for revert actions.
+</ParamField>
+
+## Response
+
+<ResponseField name="workflowInstanceId" type="UUID">
+  The ID of the workflow instance.
+</ResponseField>
+
+<ResponseField name="stepInstanceId" type="UUID">
+  The ID of the step instance that was reverted.
+</ResponseField>
+
+<ResponseField name="actionType" type="string">
+  The type of action performed (`revert`).
+</ResponseField>
+
+<ResponseField name="workflowStatus" type="string">
+  The new status of the workflow after reversion:
+  - `running` - Workflow sent back to a previous step
+  - `waiting` - Workflow is now waiting at the reverted-to step
+</ResponseField>
+
+<ResponseField name="nextStepCode" type="string | null">
+  The code of the step the workflow reverted to.
+</ResponseField>
+
+## Example Request
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST https://api.example.com/api/v1/human-tasks/789e0123-e89b-12d3-a456-426614174444/revert \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "remark": "Missing cost breakdown - sending back to requester for details",
+    "payload": {
+      "revertReason": "incomplete_information",
+      "requiredFields": ["itemized_costs", "vendor_quotes"]
+    }
+  }'
+```
+
+```javascript JavaScript
+const response = await fetch(
+  'https://api.example.com/api/v1/human-tasks/789e0123-e89b-12d3-a456-426614174444/revert',
+  {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer YOUR_TOKEN',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      remark: 'Missing cost breakdown - sending back to requester for details',
+      payload: {
+        revertReason: 'incomplete_information',
+        requiredFields: ['itemized_costs', 'vendor_quotes']
+      }
+    })
+  }
+);
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.post(
+    'https://api.example.com/api/v1/human-tasks/789e0123-e89b-12d3-a456-426614174444/revert',
+    headers={
+        'Authorization': 'Bearer YOUR_TOKEN',
+        'Content-Type': 'application/json'
+    },
+    json={
+        'remark': 'Missing cost breakdown - sending back to requester for details',
+        'payload': {
+            'revertReason': 'incomplete_information',
+            'requiredFields': ['itemized_costs', 'vendor_quotes']
+        }
+    }
+)
+
+data = response.json()
+```
+
+</CodeGroup>
+
+## Example Response
+
+```json
+{
+  "workflowInstanceId": "123e4567-e89b-12d3-a456-426614174000",
+  "stepInstanceId": "456e7890-e12b-12d3-a456-426614174222",
+  "actionType": "revert",
+  "workflowStatus": "waiting",
+  "nextStepCode": "initial_submission"
+}
+```
+
+## Status Codes
+
+<ResponseField name="200" type="OK">
+  Task reverted successfully, workflow sent back to previous step.
+</ResponseField>
+
+<ResponseField name="401" type="Unauthorized">
+  Missing or invalid authentication token.
+</ResponseField>
+
+<ResponseField name="403" type="Forbidden">
+  User is not assigned to this task.
+</ResponseField>
+
+<ResponseField name="404" type="Not Found">
+  Task not found.
+</ResponseField>
+
+<ResponseField name="409" type="Conflict">
+  Task is not in an actionable state (e.g., already completed or cancelled).
+</ResponseField>
+
+<ResponseField name="422" type="Unprocessable Entity">
+  Request validation failed:
+  - Missing required remark when `remarkRequiredOnRevert` is true
+  - No revert transition configured for this step
+  - Revert action not available in `availableActions` list
+</ResponseField>
+
+## Revert Behavior
+
+### Step Configuration
+
+Revert is only available when:
+1. Step definition has `allowRevert: true`
+2. A transition with `actionType: "revert"` is configured
+3. The revert action appears in the task's `availableActions` array
+
+### Workflow State
+
+When a task is reverted:
+1. Current task is marked as completed with `revert` action
+2. Other tasks in the step are cancelled
+3. Step instance is marked as `reverted`
+4. Workflow follows the revert transition to target step
+5. New step instance is created at the target step
+6. New tasks are created for the target step assignees
+
+### Visit Count
+
+The workflow maintains a `visitCount` for each step:
+- First visit: `visitCount = 1`
+- After revert and re-entry: `visitCount = 2`
+- Useful for detecting loops and limiting iterations
+
+## Common Use Cases
+
+### Request Additional Information
+
+Send workflow back to requester for more details:
+
+```json
+{
+  "remark": "Please provide vendor quotes for comparison",
+  "payload": {
+    "revertReason": "needs_quotes",
+    "minimumQuotesRequired": 3
+  }
+}
+```
+
+### Correction Required
+
+Send back for corrections without rejecting:
+
+```json
+{
+  "remark": "Please correct the total amount - calculation error detected",
+  "payload": {
+    "revertReason": "calculation_error",
+    "expectedTotal": 1200.00,
+    "currentTotal": 1500.00
+  }
+}
+```
+
+### Escalation Prevention
+
+Allow requester to address issues before formal rejection:
+
+```json
+{
+  "remark": "Documentation format needs updating before I can approve",
+  "payload": {
+    "revertReason": "format_issue",
+    "requiredFormat": "PDF with itemized breakdown"
+  }
+}
+```
+
+## Revert vs. Reject
+
+| Aspect | Revert | Reject |
+|--------|--------|--------|
+| **Purpose** | Send back for corrections | Decline the request |
+| **Workflow continues** | Yes, returns to earlier step | May terminate or go to rejection handler |
+| **Stigma** | Neutral - needs more info | Negative - request denied |
+| **Output** | Workflow repeats steps | Workflow may end |
+| **Use when** | Fixable issues | Fundamental problems |
+
+## Availability Check
+
+Before showing revert option in UI, check if it's available:
+
+```javascript
+const task = await fetchTask(taskId);
+const canRevert = task.availableActions.includes('revert');
+
+if (canRevert) {
+  // Show revert button
+}
+```
+
+## History Tracking
+
+All revert actions are recorded in workflow history:
+- Who reverted the workflow
+- When it was reverted
+- Reason provided in remark
+- Which step it reverted to
+- Number of times each step has been visited
+
+This creates a complete audit trail of workflow iterations.

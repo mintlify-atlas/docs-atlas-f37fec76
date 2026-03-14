@@ -1,0 +1,361 @@
+---
+title: Workflows
+description: Understanding workflow definitions and execution in the Workflow Engine Platform
+---
+
+## Overview
+
+Workflows are reusable process templates that define a series of steps and transitions for business automation. The platform separates **static workflow definitions** from **runtime execution instances**, ensuring that changes to definitions don't corrupt in-flight workflows.
+
+## Workflow Definition
+
+A workflow definition is the top-level identity for a business process. Each definition can have multiple versions, allowing you to evolve workflows over time while maintaining backward compatibility.
+
+### Core Properties
+
+<CodeGroup>
+```python Pydantic Schema
+class WorkflowDefinitionCreate(BaseModel):
+    key: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    description: str = ""
+    builderLayout: dict = Field(default_factory=dict)
+    steps: list[WorkflowStepInput]
+    transitions: list[WorkflowTransitionInput]
+```
+
+```sql Database Schema
+CREATE TABLE workflow_definition (
+    id uuid PRIMARY KEY,
+    key text NOT NULL UNIQUE,
+    name text NOT NULL,
+    description text,
+    status text NOT NULL DEFAULT 'draft',
+    created_by text REFERENCES "user"(id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+```
+</CodeGroup>
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | Stable workflow identifier |
+| `key` | string | Machine-readable key (e.g., `invoice_approval`) |
+| `name` | string | Human-readable display name |
+| `description` | string | Business description |
+| `status` | enum | `draft`, `active`, or `archived` |
+| `created_by` | UUID | User who created the workflow |
+
+<Note>
+The `key` field must be unique across all workflows and is used for programmatic workflow initiation.
+</Note>
+
+## Workflow Versions
+
+Each workflow definition maintains immutable versions. Runtime instances reference specific versions, not the mutable parent definition.
+
+### Version Schema
+
+```sql
+CREATE TABLE workflow_definition_version (
+    id uuid PRIMARY KEY,
+    workflow_definition_id uuid NOT NULL REFERENCES workflow_definition(id),
+    version_no integer NOT NULL,
+    is_published boolean NOT NULL DEFAULT false,
+    version_label text,
+    definition_snapshot jsonb NOT NULL,
+    graph_json jsonb NOT NULL,
+    builder_layout jsonb NOT NULL,
+    created_by text REFERENCES "user"(id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (workflow_definition_id, version_no)
+);
+```
+
+### Version Properties
+
+- **version_no**: Incremental version number (1, 2, 3...)
+- **is_published**: Only one version can be published at a time
+- **definition_snapshot**: Complete denormalized export for auditing
+- **graph_json**: Canonical JSON generated from steps and transitions
+- **builder_layout**: React Flow visual editor state (nodes, edges, viewport)
+
+<Warning>
+Only published versions can be used to start new workflow instances. Unpublished versions are drafts.
+</Warning>
+
+## Workflow Instance
+
+A workflow instance represents a single execution of a workflow definition. Instances track their current state, step, and history.
+
+### Runtime Schema
+
+```sql
+CREATE TABLE workflow_instance (
+    id uuid PRIMARY KEY,
+    workflow_version_id uuid NOT NULL REFERENCES workflow_definition_version(id),
+    business_key text,
+    run_number integer NOT NULL DEFAULT 1,
+    status text NOT NULL DEFAULT 'running',
+    current_step_instance_id uuid,
+    started_by text REFERENCES "user"(id),
+    started_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz,
+    parent_workflow_instance_id uuid,
+    parent_step_instance_id uuid,
+    lock_version integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+### Status Lifecycle
+
+```python
+WorkflowStatus = Literal[
+    "running",    # Actively processing steps
+    "waiting",    # Paused on a human task
+    "paused",     # Waiting for subworkflow completion
+    "completed",  # Successfully finished
+    "rejected",   # Terminated via rejection
+    "failed",     # Failed due to error
+    "cancelled"   # Manually cancelled
+]
+```
+
+<Accordion title="Workflow Instance Properties">
+  <ResponseField name="id" type="UUID">
+    Unique instance identifier
+  </ResponseField>
+  
+  <ResponseField name="workflow_version_id" type="UUID">
+    Immutable reference to the version that defines this instance
+  </ResponseField>
+  
+  <ResponseField name="business_key" type="string" optional>
+    External correlation identifier (e.g., invoice number, order ID)
+  </ResponseField>
+  
+  <ResponseField name="run_number" type="integer">
+    Execution count for this workflow/business_key combination
+  </ResponseField>
+  
+  <ResponseField name="status" type="WorkflowStatus">
+    Current lifecycle state
+  </ResponseField>
+  
+  <ResponseField name="current_step_instance_id" type="UUID" optional>
+    Pointer to the currently active step
+  </ResponseField>
+  
+  <ResponseField name="parent_workflow_instance_id" type="UUID" optional>
+    Set when this is a child workflow launched by a subworkflow step
+  </ResponseField>
+</Accordion>
+
+## Workflow Validation
+
+Before a workflow version can be published, the engine validates the graph structure to prevent invalid configurations.
+
+### Validation Rules
+
+The validation logic is implemented in `apps/api/src/api/workflows.py:72-192`:
+
+1. **Exactly one start step** is required
+2. **At least one terminal step** (end step or `isTerminal=true`)
+3. **Unique step codes** within a version
+4. **All non-terminal steps** must have outgoing transitions
+5. **All steps must be reachable** from the start step
+6. **Transition targets must exist**
+7. **No unconditional self-loops**
+8. **Cycles require guards**: Loops must have `maxVisitsPerInstance` or conditional exits
+
+### Validation Example
+
+```python
+# From workflows.py:156-183
+def dfs(step_code: str) -> None:
+    visited.add(step_code)
+    active_lookup.add(step_code)
+    active_stack.append(step_code)
+
+    for transition in outgoing.get(step_code, []):
+        next_step = transition.toStepCode
+        if not next_step:
+            continue
+
+        if next_step in active_lookup:
+            cycle = active_stack[active_stack.index(next_step):]
+            if not any(
+                steps_by_code[item].maxVisitsPerInstance is not None 
+                for item in cycle
+            ):
+                errors.append(
+                    "Detected a cycle without a maxVisitsPerInstance guard on steps: "
+                    + ", ".join(cycle)
+                )
+            continue
+
+        if next_step not in visited:
+            dfs(next_step)
+```
+
+<Note>
+The validator doesn't attempt to prove all conditional loops are safe—it enforces structural rules to prevent obviously unsafe infinite workflows.
+</Note>
+
+## Starting a Workflow Instance
+
+Workflow instances are created via the runtime API with input data and context.
+
+### API Request
+
+```python
+class WorkflowInstanceStartRequest(BaseModel):
+    workflowDefinitionId: UUID | None = None
+    workflowKey: str | None = None
+    businessKey: str | None = None
+    inputData: dict[str, Any] = Field(default_factory=dict)
+    contextData: dict[str, Any] = Field(default_factory=dict)
+```
+
+### Starting a Workflow
+
+<CodeGroup>
+```python API Call
+POST /api/v1/workflow-instances
+{
+  "workflowKey": "invoice_approval",
+  "businessKey": "INV-2024-001",
+  "inputData": {
+    "invoiceAmount": 15000,
+    "vendor": "Acme Corp",
+    "department": "Engineering"
+  },
+  "contextData": {
+    "requestedBy": "user-123",
+    "priority": "high"
+  }
+}
+```
+
+```python Implementation Reference
+# From runtime.py:1083-1190
+@router.post("/api/v1/workflow-instances")
+def start_workflow_instance(
+    payload: WorkflowInstanceStartRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> WorkflowInstanceResponse:
+    # Resolve the latest published version
+    version = _resolve_version(
+        cursor,
+        workflow_definition_id=payload.workflowDefinitionId,
+        workflow_key=payload.workflowKey,
+    )
+    
+    # Create workflow instance
+    cursor.execute(
+        """INSERT INTO workflow_instance (...) VALUES (...)""",
+        (version["id"], payload.businessKey, run_number, user.user_id)
+    )
+    
+    # Store input and context data
+    cursor.execute(
+        """INSERT INTO workflow_instance_data (...) VALUES (...)""",
+        (workflow_instance["id"], Json(payload.inputData), Json(payload.contextData))
+    )
+    
+    # Enter the start step
+    start_step = _get_start_step(cursor, version["id"])
+    _enter_step(cursor, workflow_instance, start_step, "approve")
+```
+</CodeGroup>
+
+### Workflow Instance Data
+
+Workflow variables are stored separately to avoid bloating the main instance row:
+
+```sql
+CREATE TABLE workflow_instance_data (
+    workflow_instance_id uuid PRIMARY KEY,
+    input_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+    context_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+    output_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+    last_error jsonb,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+- **input_data**: Original request payload (immutable)
+- **context_data**: Mutable state bag updated as workflow progresses
+- **output_data**: Final result when workflow completes
+- **last_error**: Error details if workflow fails
+
+## Workflow History and Audit
+
+All workflow state changes are tracked in the status history table:
+
+```sql
+CREATE TABLE workflow_status_history (
+    id uuid PRIMARY KEY,
+    workflow_instance_id uuid NOT NULL,
+    old_status text,
+    new_status text NOT NULL,
+    reason text,
+    changed_by_action_id uuid,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+Status changes are recorded in `runtime.py:59-79`:
+
+```python
+def _record_status_history(
+    cursor,
+    workflow_instance_id,
+    old_status: str | None,
+    new_status: str,
+    reason: str | None = None,
+    changed_by_action_id=None,
+) -> None:
+    cursor.execute(
+        """INSERT INTO workflow_status_history (...) VALUES (...)""",
+        (workflow_instance_id, old_status, new_status, reason, changed_by_action_id)
+    )
+```
+
+## API Endpoints
+
+### Definition Management
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/workflow-definitions` | GET | List all workflow definitions |
+| `/api/v1/workflow-definitions` | POST | Create new workflow definition |
+| `/api/v1/workflow-definitions/{id}` | GET | Get workflow definition detail |
+| `/api/v1/workflow-definitions/{id}` | PUT | Update workflow (creates new version) |
+| `/api/v1/workflow-definitions/{id}/publish` | POST | Publish latest version |
+| `/api/v1/workflow-definitions/{id}/clone` | POST | Clone existing workflow |
+
+### Instance Management
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/workflow-instances` | GET | List workflow instances |
+| `/api/v1/workflow-instances` | POST | Start new workflow instance |
+| `/api/v1/workflow-instances/{id}` | GET | Get instance detail with history |
+
+<Card title="Related Concepts" icon="link">
+  - [Steps](/concepts/steps) - Individual workflow stages
+  - [Transitions](/concepts/transitions) - Connections between steps
+  - [Subworkflows](/concepts/subworkflows) - Nested workflow execution
+</Card>
+
+## Implementation References
+
+- **Definition API**: `apps/api/src/api/workflows.py`
+- **Runtime Engine**: `apps/api/src/api/runtime.py`
+- **Definition Schemas**: `apps/api/src/api/workflow_schemas.py`
+- **Runtime Schemas**: `apps/api/src/api/runtime_schemas.py`
+- **Database Schema**: `infra/postgres/init/01_foundation.sql`

@@ -1,0 +1,471 @@
+---
+title: Visual Editor
+description: Real-time React Flow graph preview with auto-generated layouts
+---
+
+The Workflow Builder includes a **live graph preview** that visualizes your workflow definition using React Flow. As you add steps and transitions, the graph updates in real-time.
+
+## React Flow Integration
+
+The builder uses `@xyflow/react` for graph rendering:
+
+```tsx
+// From workflow-builder.tsx:3-11
+import "@xyflow/react/dist/style.css"
+
+import {
+  Background,
+  MarkerType,
+  ReactFlow,
+  type Edge,
+  type Node,
+} from "@xyflow/react"
+```
+
+## Graph Preview Component
+
+The preview is rendered in a read-only mode (workflow-builder.tsx:1157-1182):
+
+```tsx
+<Card className="border-border/70">
+  <CardHeader>
+    <CardTitle>Live graph preview</CardTitle>
+    <CardDescription>
+      Preview how the stored builder layout will render before you persist it.
+    </CardDescription>
+  </CardHeader>
+  <CardContent>
+    <div className="h-[360px] overflow-hidden rounded-2xl border border-border/70">
+      <ReactFlow
+        defaultEdges={graphEdges}
+        defaultNodes={graphNodes}
+        fitView
+        nodesDraggable={false}
+        nodesFocusable={false}
+        panOnDrag={false}
+        proOptions={{ hideAttribution: true }}
+        zoomOnDoubleClick={false}
+        zoomOnPinch={false}
+        zoomOnScroll={false}
+      >
+        <Background gap={20} size={1} />
+      </ReactFlow>
+    </div>
+  </CardContent>
+</Card>
+```
+
+<Note>
+  The graph is **read-only**. You cannot drag nodes or edit connections directly. All changes must be made through the step and transition forms.
+</Note>
+
+## Node Generation
+
+Nodes are auto-generated from the steps array:
+
+```typescript
+// From workflow-builder.tsx:393-409
+function createNodes(steps: BuilderStep[]): Node[] {
+  return steps.map((step, index) => ({
+    id: step.stepCode,
+    position: { 
+      x: index * 220, 
+      y: index % 2 === 0 ? 120 : 30 
+    },
+    data: { label: step.stepLabel || step.stepCode },
+    style: {
+      width: step.stepType === "subworkflow" ? 200 : 170,
+      borderRadius: 18,
+      border: "1px solid color-mix(in oklab, var(--border) 85%, transparent)",
+      background: "var(--card)",
+      color: "var(--card-foreground)",
+      fontSize: 13,
+      fontWeight: 600,
+      padding: 12,
+      boxShadow: "0 10px 30px rgba(15, 23, 42, 0.08)",
+    },
+  }))
+}
+```
+
+### Node Positioning
+
+The default positioning algorithm arranges nodes **left-to-right** in a staggered layout:
+
+- **X position**: `index * 220` (220px horizontal spacing)
+- **Y position**: `index % 2 === 0 ? 120 : 30` (alternates between two rows)
+
+```
+step_0 (y=120)      step_2 (y=120)      step_4 (y=120)
+           step_1 (y=30)      step_3 (y=30)
+```
+
+This prevents overlapping edges and creates a clean visual flow.
+
+### Node Styling
+
+Nodes use CSS custom properties for theming:
+
+| Property | Value | Purpose |
+|----------|-------|----------|
+| `background` | `var(--card)` | Adapts to light/dark theme |
+| `color` | `var(--card-foreground)` | Text color |
+| `border` | `var(--border)` with 85% opacity | Subtle border |
+| `borderRadius` | `18px` | Rounded corners |
+| `boxShadow` | `0 10px 30px rgba(15, 23, 42, 0.08)` | Subtle depth |
+
+<Note>
+  Subworkflow nodes are slightly wider (200px vs 170px) to accommodate longer labels.
+</Note>
+
+## Edge Generation
+
+Edges are generated from transitions:
+
+```typescript
+// From workflow-builder.tsx:412-432
+function createEdges(transitions: BuilderTransition[]): Edge[] {
+  return transitions
+    .filter((transition) => transition.fromStepCode && transition.toStepCode)
+    .map((transition) => ({
+      id: `${transition.fromStepCode}-${transition.actionType}-${transition.toStepCode}`,
+      source: transition.fromStepCode,
+      target: transition.toStepCode,
+      label: transition.transitionLabel,
+      markerEnd: { type: MarkerType.ArrowClosed },
+      animated: transition.actionType === "approve",
+      style: { strokeWidth: 1.5 },
+      labelStyle: {
+        fill: "var(--foreground)",
+        fontSize: 12,
+        fontWeight: 600,
+      },
+      labelBgStyle: {
+        fill: "var(--background)",
+      },
+    }))
+}
+```
+
+### Edge Features
+
+| Feature | Implementation | Purpose |
+|---------|----------------|----------|
+| **Arrow markers** | `markerEnd: { type: MarkerType.ArrowClosed }` | Shows direction |
+| **Animation** | `animated: transition.actionType === "approve"` | Animates "approve" edges |
+| **Labels** | `label: transition.transitionLabel` | Displays action label |
+| **Filtering** | Removes transitions with no `toStepCode` | Hides terminal transitions |
+
+<Note>
+  Terminal transitions (`toStepCode: null`) are **excluded** from the graph preview because they have no target node to render.
+</Note>
+
+## Real-Time Updates
+
+The graph preview uses React memoization to update efficiently:
+
+```typescript
+// From workflow-builder.tsx:610-611
+const graphNodes = useMemo(() => createNodes(steps), [steps])
+const graphEdges = useMemo(() => createEdges(transitions), [transitions])
+```
+
+Whenever you:
+- Add/remove/modify a step → `graphNodes` updates
+- Add/remove/modify a transition → `graphEdges` updates
+- React Flow automatically re-renders with `fitView`
+
+## Builder Layout Persistence
+
+When you save the workflow, the builder layout is persisted to the database alongside the canonical graph structure.
+
+### Server-Side Layout Generation
+
+If you don't provide a `builderLayout`, the API auto-generates one (workflows.py:23-57):
+
+```python
+def _derive_builder_layout(payload: WorkflowDefinitionCreate) -> dict:
+    nodes = []
+    edges = []
+
+    for index, step in enumerate(payload.steps):
+        nodes.append(
+            {
+                "id": step.stepCode,
+                "position": {"x": index * 220, "y": 120 if index % 2 == 0 else 40},
+                "data": {
+                    "label": step.stepLabel,
+                    "stepType": step.stepType,
+                },
+            }
+        )
+
+    for transition in payload.transitions:
+        edges.append(
+            {
+                "id": f"{transition.fromStepCode}-{transition.actionType}-{transition.toStepCode or 'terminal'}",
+                "source": transition.fromStepCode,
+                "target": transition.toStepCode,
+                "label": transition.transitionLabel,
+                "data": {
+                    "actionType": transition.actionType,
+                    "description": transition.description,
+                },
+            }
+        )
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "viewport": {"x": 0, "y": 0, "zoom": 1},
+    }
+```
+
+### Client-Side Layout Generation
+
+The builder UI generates the same structure in the payload:
+
+```typescript
+// From workflow-builder.tsx:434-449
+function toPayload(
+  key: string,
+  name: string,
+  description: string,
+  steps: BuilderStep[],
+  transitions: BuilderTransition[],
+) {
+  return {
+    key,
+    name,
+    description,
+    builderLayout: {
+      nodes: createNodes(steps),
+      edges: createEdges(transitions),
+      viewport: { x: 0, y: 0, zoom: 1 },
+    },
+    steps: [...],
+    transitions: [...],
+  }
+}
+```
+
+This ensures the graph layout is preserved when you reload the workflow definition.
+
+## Loading Existing Workflows
+
+When you click **Load** on an existing workflow, the builder restores the saved layout:
+
+```typescript
+// From workflow-builder.tsx:729-760
+async function loadDefinitionIntoForm(definitionId: string) {
+  const response = await fetch(
+    `${resolveApiBaseUrl()}/api/v1/workflow-definitions/${definitionId}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  )
+
+  const payload = (await response.json()) as WorkflowDefinitionDetail
+  const normalized = fromDetail(payload)
+  
+  setKey(normalized.key)
+  setName(normalized.name)
+  setDescription(normalized.description)
+  setSteps(normalized.steps)
+  setTransitions(normalized.transitions)
+  setSelectedDefinitionId(definitionId)
+}
+```
+
+The `builderLayout` is stored in the `workflow_definition_version` table:
+
+```python
+# From workflows.py:195-424 (excerpt)
+cursor.execute(
+    """
+    SELECT
+        d.id,
+        v.builder_layout
+    FROM workflow_definition d
+    JOIN LATERAL (
+        SELECT *
+        FROM workflow_definition_version v
+        WHERE v.workflow_definition_id = d.id
+        ORDER BY v.version_no DESC
+        LIMIT 1
+    ) v ON TRUE
+    WHERE d.id = %s
+    """,
+    (definition_id,),
+)
+```
+
+## Graph Background
+
+The preview includes a grid background for better visual reference:
+
+```tsx
+<ReactFlow ...>
+  <Background gap={20} size={1} />
+</ReactFlow>
+```
+
+| Property | Value | Effect |
+|----------|-------|--------|
+| `gap` | `20` | 20px grid spacing |
+| `size` | `1` | 1px dot size |
+
+The grid adapts to the current theme (light/dark) automatically.
+
+## Future Enhancements
+
+The current implementation is read-only, but potential future enhancements include:
+
+<AccordionGroup>
+  <Accordion title="Drag-and-drop node positioning">
+    Allow users to manually arrange nodes and persist custom layouts:
+    
+    ```tsx
+    <ReactFlow
+      nodes={graphNodes}
+      edges={graphEdges}
+      onNodesChange={onNodesChange}  // Enable dragging
+      nodesDraggable={true}
+      onNodeDragStop={(event, node) => {
+        // Persist new position to builderLayout
+      }}
+    />
+    ```
+  </Accordion>
+  
+  <Accordion title="Visual transition editing">
+    Click on edges to edit transition properties:
+    
+    ```tsx
+    <ReactFlow
+      edges={graphEdges}
+      onEdgeClick={(event, edge) => {
+        // Open transition editor dialog
+      }}
+    />
+    ```
+  </Accordion>
+  
+  <Accordion title="Auto-layout algorithms">
+    Add layout buttons for different graph algorithms:
+    
+    - **Dagre**: Hierarchical top-down layout
+    - **Force-directed**: Physics-based organic layout
+    - **Tree**: Radial or horizontal tree layout
+  </Accordion>
+  
+  <Accordion title="Node type indicators">
+    Color-code nodes by step type:
+    
+    ```typescript
+    const nodeColor = {
+      start: "#10b981",      // green
+      end: "#ef4444",        // red
+      human_task: "#3b82f6", // blue
+      system_task: "#8b5cf6",// purple
+      subworkflow: "#f59e0b",// amber
+      decision: "#06b6d4",   // cyan
+    }[step.stepType]
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Exporting the Graph
+
+The **Canonical JSON preview** shows the complete payload including the builder layout:
+
+```json
+{
+  "key": "vendor_onboarding",
+  "name": "Vendor onboarding",
+  "builderLayout": {
+    "nodes": [
+      {
+        "id": "start_request",
+        "position": { "x": 0, "y": 120 },
+        "data": { "label": "Start request" },
+        "style": { ... }
+      },
+      {
+        "id": "manager_approval",
+        "position": { "x": 220, "y": 30 },
+        "data": { "label": "Manager approval" },
+        "style": { ... }
+      }
+    ],
+    "edges": [
+      {
+        "id": "start_request-approve-manager_approval",
+        "source": "start_request",
+        "target": "manager_approval",
+        "label": "submit",
+        "markerEnd": { "type": "arrowclosed" },
+        "animated": true
+      }
+    ],
+    "viewport": { "x": 0, "y": 0, "zoom": 1 }
+  },
+  "steps": [...],
+  "transitions": [...]
+}
+```
+
+You can copy this JSON and import it into another workflow using the **Import JSON** button.
+
+## Import JSON Feature
+
+The builder includes a JSON import dialog (workflow-builder.tsx:1102-1143):
+
+```tsx
+<Dialog open={isImportOpen} onOpenChange={setIsImportOpen}>
+  <DialogTrigger asChild>
+    <Button variant="outline">Import JSON</Button>
+  </DialogTrigger>
+  <DialogContent className="max-w-2xl">
+    <DialogHeader>
+      <DialogTitle>Import Workflow JSON</DialogTitle>
+      <DialogDescription>
+        Paste the workflow JSON payload here to load it into the builder.
+      </DialogDescription>
+    </DialogHeader>
+    <textarea
+      className="min-h-[300px] w-full rounded-xl border border-input bg-transparent px-3 py-2 text-sm font-mono outline-none"
+      placeholder="{ ... }"
+      value={importJson}
+      onChange={(e) => setImportJson(e.target.value)}
+    />
+    <DialogFooter>
+      <Button onClick={() => {
+        const parsed = JSON.parse(importJson);
+        const normalized = fromDetail(parsed.item || parsed);
+        setKey(normalized.key);
+        setName(normalized.name);
+        setDescription(normalized.description);
+        setSteps(normalized.steps);
+        setTransitions(normalized.transitions);
+        setSelectedDefinitionId(null);
+        setStatus(`Imported '${normalized.name}' from JSON.`);
+      }}>Import</Button>
+    </DialogFooter>
+  </DialogContent>
+</Dialog>
+```
+
+This allows you to:
+- Copy a workflow JSON from the preview
+- Paste it into another browser/environment
+- Modify and save as a new workflow
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Validation" icon="check" href="/builder/validation">
+    Learn about graph validation and error detection
+  </Card>
+  <Card title="Creating Workflows" icon="plus" href="/builder/creating-workflows">
+    Start building your first workflow
+  </Card>
+</CardGroup>

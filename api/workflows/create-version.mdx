@@ -1,0 +1,502 @@
+---
+title: Update Workflow Definition (Create Version)
+api: PUT /api/v1/workflow-definitions/{definition_id}
+---
+
+Updates an existing workflow definition by creating a new draft version. This allows iterative improvement of workflows while preserving version history.
+
+## Authentication
+
+Requires Bearer token authentication. The authenticated user will be recorded as the version creator.
+
+## Path Parameters
+
+<ParamField path="definition_id" type="UUID" required>
+  The unique identifier of the workflow definition to update.
+</ParamField>
+
+## Request Body
+
+The request body follows the same structure as [creating a workflow definition](/api/workflows/create-definition). All fields from the creation endpoint apply here.
+
+<ParamField body="key" type="string" required>
+  Unique identifier key for the workflow definition. Can be updated to change the workflow's key.
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  Human-readable name for the workflow.
+</ParamField>
+
+<ParamField body="description" type="string" default="">
+  Detailed description of the workflow.
+</ParamField>
+
+<ParamField body="builderLayout" type="object" default="{}">
+  Visual layout information for the workflow builder UI.
+</ParamField>
+
+<ParamField body="steps" type="array" required>
+  Array of workflow steps. See [Create Workflow Definition](/api/workflows/create-definition) for full step schema.
+</ParamField>
+
+<ParamField body="transitions" type="array" required>
+  Array of transitions between steps. See [Create Workflow Definition](/api/workflows/create-definition) for full transition schema.
+</ParamField>
+
+## Response
+
+<ResponseField name="item" type="object">
+  The updated workflow definition with the new version.
+  
+  <ResponseField name="item.id" type="UUID">
+    Unique identifier for the workflow definition (unchanged).
+  </ResponseField>
+  
+  <ResponseField name="item.key" type="string">
+    The workflow key (may be updated).
+  </ResponseField>
+  
+  <ResponseField name="item.name" type="string">
+    The workflow name (may be updated).
+  </ResponseField>
+  
+  <ResponseField name="item.description" type="string">
+    The workflow description (may be updated).
+  </ResponseField>
+  
+  <ResponseField name="item.status" type="string">
+    Current status (remains unchanged by this operation).
+  </ResponseField>
+  
+  <ResponseField name="item.latestVersionId" type="UUID">
+    ID of the newly created version.
+  </ResponseField>
+  
+  <ResponseField name="item.latestVersionNo" type="integer">
+    Incremented version number.
+  </ResponseField>
+  
+  <ResponseField name="item.graphJson" type="object">
+    Structured workflow graph data for the new version.
+  </ResponseField>
+  
+  <ResponseField name="item.builderLayout" type="object">
+    Visual layout for the builder UI.
+  </ResponseField>
+  
+  <ResponseField name="item.steps" type="array">
+    Array of step definitions with new IDs.
+  </ResponseField>
+  
+  <ResponseField name="item.transitions" type="array">
+    Array of transition definitions with new IDs.
+  </ResponseField>
+</ResponseField>
+
+## Example Request
+
+<CodeGroup>
+
+```bash cURL
+curl -X PUT https://api.example.com/api/v1/workflow-definitions/9a7b8c9d-1234-5678-90ab-cdef12345678 \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "expense-approval",
+    "name": "Expense Approval Workflow",
+    "description": "Enhanced multi-level approval workflow with finance review",
+    "steps": [
+      {
+        "stepCode": "start",
+        "stepLabel": "Start",
+        "stepType": "start",
+        "sequenceHint": 1,
+        "assignmentPolicy": {}
+      },
+      {
+        "stepCode": "manager_review",
+        "stepLabel": "Manager Review",
+        "stepType": "human_task",
+        "sequenceHint": 2,
+        "remarkRequiredOnReject": true,
+        "assignmentPolicy": {
+          "approvalMode": "approve_any_one"
+        },
+        "associations": [
+          {
+            "associationType": "role",
+            "associationValue": "manager"
+          }
+        ]
+      },
+      {
+        "stepCode": "finance_review",
+        "stepLabel": "Finance Review",
+        "stepType": "human_task",
+        "sequenceHint": 3,
+        "remarkRequiredOnReject": true,
+        "assignmentPolicy": {
+          "approvalMode": "approve_any_one"
+        },
+        "associations": [
+          {
+            "associationType": "role",
+            "associationValue": "finance"
+          }
+        ]
+      },
+      {
+        "stepCode": "end",
+        "stepLabel": "End",
+        "stepType": "end",
+        "sequenceHint": 4,
+        "isTerminal": true,
+        "assignmentPolicy": {}
+      }
+    ],
+    "transitions": [
+      {
+        "fromStepCode": "start",
+        "toStepCode": "manager_review",
+        "actionType": "approve",
+        "transitionLabel": "Submit for Review"
+      },
+      {
+        "fromStepCode": "manager_review",
+        "toStepCode": "finance_review",
+        "actionType": "approve",
+        "transitionLabel": "Approve",
+        "conditionExpression": "amount > 1000"
+      },
+      {
+        "fromStepCode": "manager_review",
+        "toStepCode": "end",
+        "actionType": "approve",
+        "transitionLabel": "Approve",
+        "conditionExpression": "amount <= 1000"
+      },
+      {
+        "fromStepCode": "manager_review",
+        "toStepCode": null,
+        "actionType": "reject",
+        "transitionLabel": "Reject"
+      },
+      {
+        "fromStepCode": "finance_review",
+        "toStepCode": "end",
+        "actionType": "approve",
+        "transitionLabel": "Approve"
+      },
+      {
+        "fromStepCode": "finance_review",
+        "toStepCode": null,
+        "actionType": "reject",
+        "transitionLabel": "Reject"
+      }
+    ]
+  }'
+```
+
+```javascript JavaScript
+const response = await fetch(
+  'https://api.example.com/api/v1/workflow-definitions/9a7b8c9d-1234-5678-90ab-cdef12345678',
+  {
+    method: 'PUT',
+    headers: {
+      'Authorization': 'Bearer YOUR_TOKEN',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      key: 'expense-approval',
+      name: 'Expense Approval Workflow',
+      description: 'Enhanced multi-level approval workflow with finance review',
+      steps: [
+        {
+          stepCode: 'start',
+          stepLabel: 'Start',
+          stepType: 'start',
+          sequenceHint: 1,
+          assignmentPolicy: {}
+        },
+        {
+          stepCode: 'manager_review',
+          stepLabel: 'Manager Review',
+          stepType: 'human_task',
+          sequenceHint: 2,
+          remarkRequiredOnReject: true,
+          assignmentPolicy: {
+            approvalMode: 'approve_any_one'
+          },
+          associations: [
+            {
+              associationType: 'role',
+              associationValue: 'manager'
+            }
+          ]
+        },
+        {
+          stepCode: 'finance_review',
+          stepLabel: 'Finance Review',
+          stepType: 'human_task',
+          sequenceHint: 3,
+          remarkRequiredOnReject: true,
+          assignmentPolicy: {
+            approvalMode: 'approve_any_one'
+          },
+          associations: [
+            {
+              associationType: 'role',
+              associationValue: 'finance'
+            }
+          ]
+        },
+        {
+          stepCode: 'end',
+          stepLabel: 'End',
+          stepType: 'end',
+          sequenceHint: 4,
+          isTerminal: true,
+          assignmentPolicy: {}
+        }
+      ],
+      transitions: [
+        {
+          fromStepCode: 'start',
+          toStepCode: 'manager_review',
+          actionType: 'approve',
+          transitionLabel: 'Submit for Review'
+        },
+        {
+          fromStepCode: 'manager_review',
+          toStepCode: 'finance_review',
+          actionType: 'approve',
+          transitionLabel: 'Approve',
+          conditionExpression: 'amount > 1000'
+        },
+        {
+          fromStepCode: 'manager_review',
+          toStepCode: 'end',
+          actionType: 'approve',
+          transitionLabel: 'Approve',
+          conditionExpression: 'amount <= 1000'
+        },
+        {
+          fromStepCode: 'manager_review',
+          toStepCode: null,
+          actionType: 'reject',
+          transitionLabel: 'Reject'
+        },
+        {
+          fromStepCode: 'finance_review',
+          toStepCode: 'end',
+          actionType: 'approve',
+          transitionLabel: 'Approve'
+        },
+        {
+          fromStepCode: 'finance_review',
+          toStepCode: null,
+          actionType: 'reject',
+          transitionLabel: 'Reject'
+        }
+      ]
+    })
+  }
+);
+
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.put(
+    'https://api.example.com/api/v1/workflow-definitions/9a7b8c9d-1234-5678-90ab-cdef12345678',
+    headers={
+        'Authorization': 'Bearer YOUR_TOKEN',
+        'Content-Type': 'application/json'
+    },
+    json={
+        'key': 'expense-approval',
+        'name': 'Expense Approval Workflow',
+        'description': 'Enhanced multi-level approval workflow with finance review',
+        'steps': [
+            {
+                'stepCode': 'start',
+                'stepLabel': 'Start',
+                'stepType': 'start',
+                'sequenceHint': 1,
+                'assignmentPolicy': {}
+            },
+            {
+                'stepCode': 'manager_review',
+                'stepLabel': 'Manager Review',
+                'stepType': 'human_task',
+                'sequenceHint': 2,
+                'remarkRequiredOnReject': True,
+                'assignmentPolicy': {
+                    'approvalMode': 'approve_any_one'
+                },
+                'associations': [
+                    {
+                        'associationType': 'role',
+                        'associationValue': 'manager'
+                    }
+                ]
+            },
+            {
+                'stepCode': 'finance_review',
+                'stepLabel': 'Finance Review',
+                'stepType': 'human_task',
+                'sequenceHint': 3,
+                'remarkRequiredOnReject': True,
+                'assignmentPolicy': {
+                    'approvalMode': 'approve_any_one'
+                },
+                'associations': [
+                    {
+                        'associationType': 'role',
+                        'associationValue': 'finance'
+                    }
+                ]
+            },
+            {
+                'stepCode': 'end',
+                'stepLabel': 'End',
+                'stepType': 'end',
+                'sequenceHint': 4,
+                'isTerminal': True,
+                'assignmentPolicy': {}
+            }
+        ],
+        'transitions': [
+            {
+                'fromStepCode': 'start',
+                'toStepCode': 'manager_review',
+                'actionType': 'approve',
+                'transitionLabel': 'Submit for Review'
+            },
+            {
+                'fromStepCode': 'manager_review',
+                'toStepCode': 'finance_review',
+                'actionType': 'approve',
+                'transitionLabel': 'Approve',
+                'conditionExpression': 'amount > 1000'
+            },
+            {
+                'fromStepCode': 'manager_review',
+                'toStepCode': 'end',
+                'actionType': 'approve',
+                'transitionLabel': 'Approve',
+                'conditionExpression': 'amount <= 1000'
+            },
+            {
+                'fromStepCode': 'manager_review',
+                'toStepCode': None,
+                'actionType': 'reject',
+                'transitionLabel': 'Reject'
+            },
+            {
+                'fromStepCode': 'finance_review',
+                'toStepCode': 'end',
+                'actionType': 'approve',
+                'transitionLabel': 'Approve'
+            },
+            {
+                'fromStepCode': 'finance_review',
+                'toStepCode': None,
+                'actionType': 'reject',
+                'transitionLabel': 'Reject'
+            }
+        ]
+    }
+)
+
+data = response.json()
+```
+
+</CodeGroup>
+
+## Example Response
+
+```json
+{
+  "item": {
+    "id": "9a7b8c9d-1234-5678-90ab-cdef12345678",
+    "key": "expense-approval",
+    "name": "Expense Approval Workflow",
+    "description": "Enhanced multi-level approval workflow with finance review",
+    "status": "draft",
+    "latestVersionId": "new-version-uuid-here",
+    "latestVersionNo": 2,
+    "graphJson": {
+      "workflow": {
+        "key": "expense-approval",
+        "name": "Expense Approval Workflow",
+        "description": "Enhanced multi-level approval workflow with finance review"
+      },
+      "steps": [...],
+      "transitions": [...]
+    },
+    "builderLayout": {...},
+    "steps": [...],
+    "transitions": [...]
+  }
+}
+```
+
+## Status Codes
+
+<ResponseField name="200" type="OK">
+  Workflow definition updated successfully with new version created.
+</ResponseField>
+
+<ResponseField name="401" type="Unauthorized">
+  Missing or invalid authentication token.
+</ResponseField>
+
+<ResponseField name="404" type="Not Found">
+  Workflow definition not found.
+</ResponseField>
+
+<ResponseField name="422" type="Unprocessable Entity">
+  Validation failed. See [Create Workflow Definition](/api/workflows/create-definition) for validation rules.
+</ResponseField>
+
+## Behavior
+
+### Version Increment
+
+- Each update creates a new version with an incremented version number
+- The previous version remains in the database for historical reference
+- Version numbering starts at 1 and increments sequentially
+
+### Draft Status
+
+- New versions are always created in `draft` state (not published)
+- The workflow definition's overall status is not changed by this operation
+- To activate the new version, use the [Publish endpoint](/api/workflows/publish)
+
+### Metadata Updates
+
+- The workflow's `key`, `name`, and `description` are updated at the definition level
+- All other changes (steps, transitions, layout) are version-specific
+
+### ID Generation
+
+- All steps, transitions, policies, associations, and related entities receive new UUIDs
+- The workflow definition ID remains unchanged
+- References to step codes remain the same if you use consistent step codes
+
+### Active Instances
+
+- Existing workflow instances continue running on their original version
+- New versions do not affect already-running workflows
+- This ensures consistency and prevents breaking changes to active processes
+
+## Use Cases
+
+1. **Iterative Development**: Refine workflows without affecting production instances
+2. **Add Steps**: Introduce new approval stages or decision points
+3. **Modify Transitions**: Change routing logic or add conditional paths
+4. **Update Assignments**: Change who is assigned to each step
+5. **Fix Validation Issues**: Correct workflow structure problems

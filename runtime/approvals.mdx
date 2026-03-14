@@ -1,0 +1,531 @@
+---
+title: Task Approvals
+description: Approve, reject, or revert human tasks to advance workflow instances
+---
+
+## Overview
+
+Human tasks must be actioned by assigned users to advance the workflow. The platform supports approve, reject, revert, and custom actions with optional remarks and payload data.
+
+## Generic Task Action Endpoint
+
+### POST /api/v1/human-tasks/:task_id/actions
+
+Submit any action type to a task with full control over action parameters.
+
+**Request Body:**
+
+```json
+{
+  "actionType": "approve",
+  "remark": "Budget approved by finance team",
+  "payload": {
+    "approvedAmount": 15000,
+    "notes": "Vendor verification completed"
+  },
+  "actionCode": null
+}
+```
+
+<ParamField path="actionType" type="string" required>
+  The action to perform: `"approve"`, `"reject"`, `"revert"`, or `"custom"`
+</ParamField>
+
+<ParamField path="remark" type="string" optional>
+  Optional comment explaining the decision. Required if the step has `remark_required_on_approve`, `remark_required_on_reject`, or `remark_required_on_revert` enabled.
+</ParamField>
+
+<ParamField path="payload" type="object" default="{}">
+  Additional data to attach to the action. This is stored in the `workflow_action` table and can be used by output mappings.
+</ParamField>
+
+<ParamField path="actionCode" type="string" optional>
+  For custom actions, the specific transition code to follow (matches `action_code` on a `workflow_transition_definition`).
+</ParamField>
+
+**Response (200 OK):**
+
+```json
+{
+  "workflowInstanceId": "workflow-instance-uuid",
+  "stepInstanceId": "step-instance-uuid",
+  "actionType": "approve",
+  "workflowStatus": "waiting",
+  "nextStepCode": "cfo-approval"
+}
+```
+
+<ResponseField name="workflowInstanceId" type="UUID">
+  The workflow instance that was updated
+</ResponseField>
+
+<ResponseField name="stepInstanceId" type="UUID">
+  The step instance that was completed
+</ResponseField>
+
+<ResponseField name="actionType" type="string">
+  The action that was applied
+</ResponseField>
+
+<ResponseField name="workflowStatus" type="string">
+  The new workflow status: `"running"`, `"waiting"`, `"completed"`, or `"rejected"`
+</ResponseField>
+
+<ResponseField name="nextStepCode" type="string | null">
+  The step code the workflow advanced to, or `null` if the workflow completed
+</ResponseField>
+
+## Specialized Action Endpoints
+
+For convenience, the platform provides action-specific endpoints that set `actionType` automatically.
+
+### Approve Action
+
+**POST /api/v1/human-tasks/:task_id/approve**
+
+```json
+{
+  "remark": "Looks good",
+  "payload": {}
+}
+```
+
+Equivalent to calling the generic endpoint with `"actionType": "approve"`.
+
+### Reject Action
+
+**POST /api/v1/human-tasks/:task_id/reject**
+
+```json
+{
+  "remark": "Insufficient documentation",
+  "payload": {
+    "reason": "missing-vendor-invoice"
+  }
+}
+```
+
+Equivalent to calling the generic endpoint with `"actionType": "reject"`.
+
+### Revert Action
+
+**POST /api/v1/human-tasks/:task_id/revert**
+
+```json
+{
+  "remark": "Send back to requester for corrections",
+  "payload": {}
+}
+```
+
+Equivalent to calling the generic endpoint with `"actionType": "revert"`.
+
+<CodeGroup>
+```python FastAPI Route Definitions
+# From runtime.py:1647-1674
+@router.post("/api/v1/human-tasks/{task_id}/approve", response_model=WorkflowTaskActionResponse)
+def approve_human_task(
+    task_id: str,
+    payload: WorkflowTaskActionRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> WorkflowTaskActionResponse:
+    payload.actionType = "approve"
+    return action_human_task(task_id, payload, user)
+
+
+@router.post("/api/v1/human-tasks/{task_id}/reject", response_model=WorkflowTaskActionResponse)
+def reject_human_task(
+    task_id: str,
+    payload: WorkflowTaskActionRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> WorkflowTaskActionResponse:
+    payload.actionType = "reject"
+    return action_human_task(task_id, payload, user)
+
+
+@router.post("/api/v1/human-tasks/{task_id}/revert", response_model=WorkflowTaskActionResponse)
+def revert_human_task(
+    task_id: str,
+    payload: WorkflowTaskActionRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> WorkflowTaskActionResponse:
+    payload.actionType = "revert"
+    return action_human_task(task_id, payload, user)
+```
+
+```typescript Frontend Action Submission
+// From runtime-console.tsx:361-399
+async function submitTaskAction(task: HumanTask, actionType: TaskActionType) {
+  setIsBusy(true)
+  setError(null)
+  setStatus(`Submitting ${actionType} action for ${task.stepLabel}...`)
+
+  try {
+    const response = await authedFetch(`/api/v1/human-tasks/${task.id}/actions`, {
+      method: "POST",
+      body: JSON.stringify({
+        actionType,
+        remark: taskRemarks[task.id] || null,
+        payload: {
+          source: "runtime-console",
+        },
+      }),
+    })
+
+    const payload = (await response.json()) as {
+      workflowInstanceId?: string
+      nextStepCode?: string | null
+      workflowStatus?: string
+      detail?: string
+    }
+    if (!response.ok) {
+      throw new Error(payload.detail ?? "Unable to submit task action.")
+    }
+
+    setStatus(
+      `Task action ${actionType} recorded. Workflow is now ${payload.workflowStatus ?? "updated"}.`,
+    )
+    setTaskRemarks((current) => ({ ...current, [task.id]: "" }))
+    await Promise.all([refreshAll(), loadInstanceDetail(task.workflowInstanceId)])
+  } catch (actionError) {
+    setError(actionError instanceof Error ? actionError.message : "Unable to action task.")
+    setStatus("Task action failed.")
+  } finally {
+    setIsBusy(false)
+  }
+}
+```
+</CodeGroup>
+
+## Action Processing Logic
+
+When a task action is submitted, the backend executes the following steps:
+
+### 1. Validate Task State
+
+```python
+# From runtime.py:1272-1276
+if task_row["status"] != "open":
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Only open tasks can be actioned.",
+    )
+```
+
+Only tasks with `status = "open"` can be actioned.
+
+### 2. Verify User Assignment
+
+```python
+# From runtime.py:1278-1282
+if not _current_user_matches_task(user, task_row):
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="You are not assigned to this task.",
+    )
+```
+
+The user must match `assigned_user_id` or `assigned_user_email`.
+
+### 3. Check Remark Requirements
+
+```python
+# From runtime.py:1256-1263 and 1284-1288
+def _remark_required(task_row, action_type: str) -> bool:
+    if action_type == "approve":
+        return task_row["remark_required_on_approve"]
+    if action_type == "reject":
+        return task_row["remark_required_on_reject"]
+    if action_type == "revert":
+        return task_row["remark_required_on_revert"]
+    return False
+
+if _remark_required(task_row, payload.actionType) and not payload.remark:
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail="A remark is required for this action.",
+    )
+```
+
+### 4. Record Workflow Action
+
+```python
+# From runtime.py:1305-1329
+cursor.execute(
+    """
+    INSERT INTO workflow_action (
+        workflow_instance_id,
+        step_instance_id,
+        action_type,
+        action_code,
+        actor_user_id,
+        actor_type,
+        remark_text,
+        payload
+    )
+    VALUES (%s, %s, %s, %s, %s, 'user', %s, %s)
+    RETURNING id
+    """,
+    (
+        task_row["workflow_instance_id"],
+        task_row["step_instance_id"],
+        action_type,
+        payload.actionCode,
+        user.user_id,
+        payload.remark,
+        Json(payload.payload),
+    ),
+)
+action_id = cursor.fetchone()["id"]
+```
+
+### 5. Mark Task as Completed
+
+```python
+# From runtime.py:1331-1338
+cursor.execute(
+    """
+    UPDATE human_task
+    SET status = 'completed', completed_at = now()
+    WHERE id = %s
+    """,
+    (task_row["id"],),
+)
+```
+
+### 6. Handle Approval Mode Logic
+
+The platform checks the `approval_mode_snapshot` to determine whether to advance the workflow immediately or wait for more tasks.
+
+#### approve_all Mode
+
+```python
+# From runtime.py:1343-1364
+if approval_mode == "approve_all":
+    if action_type == "approve":
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS remaining
+            FROM human_task
+            WHERE step_instance_id = %s AND status IN ('open', 'queued', 'claimed') AND id <> %s
+            """,
+            (task_row["step_instance_id"], task_row["id"]),
+        )
+        remaining = cursor.fetchone()["remaining"]
+        if remaining > 0:
+            advance = False
+            cursor.execute(
+                """
+                UPDATE step_instance
+                SET result_action = 'approve'
+                WHERE id = %s
+                """,
+                (task_row["step_instance_id"],),
+            )
+```
+
+If any tasks remain open, the workflow does not advance yet.
+
+#### approve_any_one Mode
+
+```python
+# From runtime.py:1366-1378
+elif approval_mode == "approve_any_one":
+    if action_type == "reject":
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS remaining
+            FROM human_task
+            WHERE step_instance_id = %s AND status IN ('open', 'queued', 'claimed') AND id <> %s
+            """,
+            (task_row["step_instance_id"], task_row["id"]),
+        )
+        remaining = cursor.fetchone()["remaining"]
+        if remaining > 0:
+            advance = False
+```
+
+If one user approves, the workflow advances immediately. If one rejects but others remain, it waits.
+
+#### priority_chain Mode
+
+```python
+# From runtime.py:1380-1442
+elif approval_mode == "priority_chain":
+    if action_type == "reject":
+        cursor.execute(
+            """
+            SELECT * FROM human_task
+            WHERE step_instance_id = %s AND status = 'queued' AND sequence_no > %s
+            ORDER BY sequence_no ASC LIMIT 1
+            """,
+            (task_row["step_instance_id"], task_row["sequence_no"]),
+        )
+        next_task = cursor.fetchone()
+        if next_task:
+            advance = False
+            cursor.execute(
+                "UPDATE human_task SET status = 'open' WHERE id = %s",
+                (next_task["id"],),
+            )
+            # Send notification to next assignee
+            ...
+```
+
+If the current task is rejected, the next queued task opens. The workflow only advances when all tasks in the chain are completed.
+
+### 7. Cancel Other Tasks
+
+```python
+# From runtime.py:1452 and 1590-1598
+_cancel_other_tasks(cursor, task_row["step_instance_id"], task_row["id"])
+
+def _cancel_other_tasks(cursor, step_instance_id, except_task_id):
+    cursor.execute(
+        """
+        UPDATE human_task
+        SET status = 'cancelled'
+        WHERE step_instance_id = %s AND id <> %s AND status IN ('queued', 'open', 'claimed')
+        """,
+        (step_instance_id, except_task_id),
+    )
+```
+
+In `approve_any_one` or when the workflow advances, all other tasks are cancelled.
+
+### 8. Complete Step Instance
+
+```python
+# From runtime.py:1454-1473
+step_status = {
+    "approve": "completed",
+    "reject": "rejected",
+    "revert": "reverted",
+    "custom": "completed",
+}[action_type]
+
+cursor.execute(
+    """
+    UPDATE step_instance
+    SET status = %s, completed_at = now(), actor_user_id = %s, result_action = %s, result_payload = %s
+    WHERE id = %s
+    """,
+    (
+        step_status,
+        user.user_id,
+        action_type,
+        Json(payload.payload),
+        task_row["step_instance_id"],
+    ),
+)
+```
+
+### 9. Advance Workflow
+
+If the workflow should advance (not waiting for more approvals):
+
+```python
+# From runtime.py:1479-1520
+transition = _transition_for_action(
+    cursor,
+    workflow_instance["workflow_version_id"],
+    from_step_definition_id,
+    action_type,
+    payload.actionCode,
+)
+
+if transition is None or transition["to_step_definition_id"] is None:
+    # No next step: complete the workflow
+    new_status = "completed" if action_type == "approve" else "rejected"
+    cursor.execute(
+        """
+        UPDATE workflow_instance
+        SET status = %s, completed_at = now(), updated_at = now()
+        WHERE id = %s
+        """,
+        (new_status, task_row["workflow_instance_id"]),
+    )
+    _record_status_history(
+        cursor,
+        task_row["workflow_instance_id"],
+        old_status,
+        new_status,
+        reason=f"task action {action_type}",
+        changed_by_action_id=action_id,
+    )
+else:
+    # Transition to next step
+    next_step = _get_step_by_id(cursor, transition["to_step_definition_id"])
+    entry = _enter_step(cursor, workflow_instance, next_step, action_type)
+    next_step_code = entry["next_step_code"]
+```
+
+## Error Handling
+
+**403 Forbidden:**
+
+```json
+{
+  "detail": "You are not assigned to this task."
+}
+```
+
+The authenticated user does not match the task assignment.
+
+**404 Not Found:**
+
+```json
+{
+  "detail": "Task not found."
+}
+```
+
+The `task_id` does not exist.
+
+**409 Conflict:**
+
+```json
+{
+  "detail": "Only open tasks can be actioned."
+}
+```
+
+The task status is not `"open"`.
+
+**422 Unprocessable Entity:**
+
+```json
+{
+  "detail": "A remark is required for this action."
+}
+```
+
+The step requires a remark but none was provided.
+
+```json
+{
+  "detail": "No matching transition exists for this action."
+}
+```
+
+The action type has no defined transition in the workflow graph.
+
+## Workflow Advancement
+
+After task completion, the workflow can:
+
+1. **Remain waiting:** If approval mode requires more tasks to complete
+2. **Advance to next step:** If a matching transition exists
+3. **Complete:** If the transition points to `null` (terminal)
+4. **Reject:** If the action is `"reject"` and no next step is defined
+
+The `nextStepCode` in the response indicates the result:
+
+- `"manager-review"`: Workflow advanced to the manager review step
+- `null`: Workflow reached a terminal state (completed or rejected)
+
+## Related Endpoints
+
+- [Task Inbox](/runtime/task-inbox)
+- [Workflow Monitoring](/runtime/workflow-monitoring)
+- [Status History](/runtime/history)

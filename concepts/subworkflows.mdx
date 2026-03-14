@@ -1,0 +1,758 @@
+---
+title: Subworkflows
+description: Understanding nested workflow execution and parent-child workflow orchestration
+---
+
+## Overview
+
+Subworkflows enable a workflow step to launch another workflow as a child process. The parent workflow pauses until the child completes, then resumes with the child's output data.
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Modular Processes" icon="boxes-stacked">
+    Reuse common approval flows (e.g., budget approval) across multiple parent workflows
+  </Card>
+  
+  <Card title="Complex Orchestration" icon="diagram-project">
+    Break down large workflows into manageable sub-processes with clear boundaries
+  </Card>
+  
+  <Card title="Conditional Branching" icon="code-branch">
+    Launch different child workflows based on runtime data (e.g., high-value vs. standard approval)
+  </Card>
+  
+  <Card title="Parallel Execution" icon="layer-group">
+    Future enhancement: Launch multiple child workflows concurrently
+  </Card>
+</CardGroup>
+
+## Subworkflow Step Type
+
+Steps with `stepType: "subworkflow"` trigger child workflow execution.
+
+### Step Configuration
+
+```python
+class WorkflowStepInput(BaseModel):
+    stepCode: str
+    stepLabel: str
+    stepType: Literal["subworkflow"]
+    subworkflowMapping: WorkflowStepMappingInput  # Required for subworkflow steps
+    # ... other fields
+```
+
+### Validation
+
+Subworkflow steps must have a mapping defined:
+
+```python
+# From workflows.py:124-126
+for step in payload.steps:
+    if step.stepType == "subworkflow" and step.subworkflowMapping is None:
+        errors.append(f"Subworkflow step '{step.stepCode}' requires a subworkflow mapping.")
+```
+
+<Warning>
+Attempting to create a subworkflow step without a mapping will fail validation.
+</Warning>
+
+## Subworkflow Mapping
+
+The mapping defines which child workflow to launch, how to pass data, and how to handle results.
+
+### Mapping Schema
+
+```python
+class WorkflowStepMappingInput(BaseModel):
+    childWorkflowDefinitionId: UUID | None = None
+    childWorkflowVersionId: UUID | None = None
+    triggerMode: TriggerMode = "sync_wait"
+    inputMapping: dict = Field(default_factory=dict)
+    outputMapping: dict = Field(default_factory=dict)
+    completionAction: ActionType = "approve"
+    failureAction: ActionType = "reject"
+
+TriggerMode = Literal["sync_wait", "async_wait"]
+```
+
+### Database Schema
+
+```sql
+CREATE TABLE workflow_step_mapping (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    step_definition_id uuid NOT NULL UNIQUE REFERENCES workflow_step_definition(id),
+    child_workflow_definition_id uuid REFERENCES workflow_definition(id),
+    child_workflow_version_id uuid REFERENCES workflow_definition_version(id),
+    trigger_mode text NOT NULL DEFAULT 'sync_wait',
+    input_mapping jsonb NOT NULL DEFAULT '{}'::jsonb,
+    output_mapping jsonb NOT NULL DEFAULT '{}'::jsonb,
+    completion_action text,
+    failure_action text,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+### Mapping Properties
+
+<ResponseField name="childWorkflowDefinitionId" type="UUID" optional>
+  Target workflow definition. If specified without `childWorkflowVersionId`, the latest published version is used.
+</ResponseField>
+
+<ResponseField name="childWorkflowVersionId" type="UUID" optional>
+  Specific workflow version to launch. Use this to pin to a particular version.
+</ResponseField>
+
+<ResponseField name="triggerMode" type="TriggerMode" default="sync_wait">
+  Currently only `sync_wait` is implemented. Parent pauses until child completes.
+  
+  Future: `async_wait` would allow asynchronous child execution.
+</ResponseField>
+
+<ResponseField name="inputMapping" type="object">
+  Maps parent context data to child workflow input. Uses JSONPath-style expressions.
+</ResponseField>
+
+<ResponseField name="outputMapping" type="object">
+  Maps child workflow output back to parent context data.
+</ResponseField>
+
+<ResponseField name="completionAction" type="ActionType" default="approve">
+  Action applied to parent when child completes successfully (typically `approve`)
+</ResponseField>
+
+<ResponseField name="failureAction" type="ActionType" default="reject">
+  Action applied to parent when child fails or is rejected (typically `reject`)
+</ResponseField>
+
+## Data Mapping
+
+Mappings use JSONPath expressions to extract and transform data between parent and child workflows.
+
+### Input Mapping
+
+Maps parent context data to child input:
+
+```json
+{
+  "inputMapping": {
+    "amount": "$.invoiceAmount",
+    "department": "$.department",
+    "requestedBy": "$.requestedBy",
+    "priority": "high"
+  }
+}
+```
+
+### Mapping Resolution
+
+```python
+# From runtime.py:611-621
+def _resolve_mapping_value(path: str, source: dict[str, Any]):
+    if path.startswith("$."):
+        path = path[2:]
+    current: Any = source
+    for part in path.split("."):
+        if not part:
+            continue
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+```
+
+### Applying Input Mapping
+
+```python
+# From runtime.py:676-684
+parent_context = parent_data["context_data"] if parent_data else {}
+child_input = {}
+for destination, source_path in (mapping["input_mapping"] or {}).items():
+    if isinstance(source_path, str):
+        child_input[destination] = _resolve_mapping_value(source_path, parent_context or {})
+    else:
+        child_input[destination] = source_path
+```
+
+### Output Mapping
+
+Maps child output back to parent context:
+
+```json
+{
+  "outputMapping": {
+    "budgetApproved": "$.approved",
+    "budgetApprovedBy": "$.approver",
+    "budgetApprovedAt": "$.approvedDate"
+  }
+}
+```
+
+### Applying Output Mapping
+
+```python
+# From runtime.py:624-633
+def _apply_output_mapping(output_mapping: dict[str, Any], payload: dict[str, Any], current_context: dict[str, Any]):
+    updated = dict(current_context)
+    for destination, source_path in (output_mapping or {}).items():
+        value = (
+            _resolve_mapping_value(source_path, payload)
+            if isinstance(source_path, str)
+            else source_path
+        )
+        updated[destination] = value
+    return updated
+```
+
+## Subworkflow Execution Flow
+
+When a workflow enters a subworkflow step, the following sequence occurs:
+
+<Steps>
+  <Step title="Parent Pauses">
+    Parent workflow status changes to `paused`, step instance to `waiting`
+  </Step>
+  
+  <Step title="Child Launches">
+    Child workflow instance is created with input data from mapping
+  </Step>
+  
+  <Step title="Link Created">
+    Parent-child relationship recorded in `subworkflow_link` table
+  </Step>
+  
+  <Step title="Child Executes">
+    Child workflow runs independently through its steps
+  </Step>
+  
+  <Step title="Child Completes">
+    Child reaches terminal state (`completed` or `rejected`)
+  </Step>
+  
+  <Step title="Output Mapped">
+    Child output data mapped back to parent context
+  </Step>
+  
+  <Step title="Parent Resumes">
+    Parent status returns to `running`, workflow advances based on completion/failure action
+  </Step>
+</Steps>
+
+### Parent Pause Implementation
+
+```python
+# From runtime.py:896-931
+if step_definition["step_type"] == "subworkflow":
+    mapping = _get_mapping(cursor, step_definition["id"])
+    if mapping is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Subworkflow step '{step_definition['step_code']}' has no mapping."
+        )
+
+    # Pause parent workflow
+    cursor.execute(
+        """UPDATE workflow_instance
+           SET status = 'paused', current_step_instance_id = %s, updated_at = now()
+           WHERE id = %s""",
+        (step_instance["id"], workflow_instance["id"])
+    )
+    _record_status_history(
+        cursor,
+        workflow_instance["id"],
+        workflow_instance["status"],
+        "paused",
+        reason="waiting on subworkflow"
+    )
+    
+    # Mark step as waiting
+    cursor.execute(
+        """UPDATE step_instance
+           SET status = 'waiting', waiting_since = now()
+           WHERE id = %s""",
+        (step_instance["id"],)
+    )
+    
+    # Launch child
+    _start_child_workflow_instance(cursor, workflow_instance, step_instance, mapping)
+```
+
+### Child Launch Implementation
+
+```python
+# From runtime.py:636-721
+def _start_child_workflow_instance(cursor, parent_workflow_instance, parent_step_instance, mapping):
+    # Resolve child workflow version
+    child_version = _resolve_version(
+        cursor,
+        workflow_definition_id=mapping["child_workflow_definition_id"],
+    )
+    
+    # Generate unique business key
+    business_key = f"{parent_workflow_instance['id']}::{parent_step_instance['id']}::child"
+    
+    # Create child instance
+    cursor.execute(
+        """INSERT INTO workflow_instance (
+            workflow_version_id,
+            business_key,
+            run_number,
+            status,
+            started_by,
+            parent_workflow_instance_id,
+            parent_step_instance_id
+        ) VALUES (%s, %s, 1, 'running', %s, %s, %s)
+        RETURNING *""",
+        (
+            child_version["id"],
+            business_key,
+            parent_workflow_instance.get("started_by"),
+            parent_workflow_instance["id"],
+            parent_step_instance["id"],
+        ),
+    )
+    child_workflow_instance = cursor.fetchone()
+    
+    # Apply input mapping
+    cursor.execute(
+        """SELECT context_data FROM workflow_instance_data
+           WHERE workflow_instance_id = %s""",
+        (parent_workflow_instance["id"],)
+    )
+    parent_data = cursor.fetchone()
+    parent_context = parent_data["context_data"] if parent_data else {}
+    child_input = {}
+    for destination, source_path in (mapping["input_mapping"] or {}).items():
+        if isinstance(source_path, str):
+            child_input[destination] = _resolve_mapping_value(source_path, parent_context or {})
+        else:
+            child_input[destination] = source_path
+    
+    # Store child input data
+    cursor.execute(
+        """INSERT INTO workflow_instance_data (
+            workflow_instance_id, input_data, context_data, output_data
+        ) VALUES (%s, %s, %s, '{}'::jsonb)""",
+        (child_workflow_instance["id"], Json(child_input), Json(child_input))
+    )
+    
+    # Create link
+    cursor.execute(
+        """INSERT INTO subworkflow_link (
+            parent_workflow_instance_id,
+            parent_step_instance_id,
+            child_workflow_instance_id,
+            link_status
+        ) VALUES (%s, %s, %s, 'running')""",
+        (
+            parent_workflow_instance["id"],
+            parent_step_instance["id"],
+            child_workflow_instance["id"],
+        ),
+    )
+    
+    # Enter child start step
+    start_step = _get_start_step(cursor, child_version["id"])
+    _enter_step(cursor, child_workflow_instance, start_step, "approve")
+```
+
+## Subworkflow Link
+
+The link table tracks parent-child relationships and resumption state.
+
+### Link Schema
+
+```sql
+CREATE TABLE subworkflow_link (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    parent_workflow_instance_id uuid NOT NULL REFERENCES workflow_instance(id),
+    parent_step_instance_id uuid NOT NULL REFERENCES step_instance(id),
+    child_workflow_instance_id uuid NOT NULL REFERENCES workflow_instance(id),
+    link_status text NOT NULL DEFAULT 'running',
+    resume_action text,
+    linked_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz
+);
+```
+
+### Link Status
+
+- **running**: Child is currently executing
+- **completed**: Child completed successfully
+- **failed**: Child failed or was rejected
+- **cancelled**: Child was manually cancelled
+
+## Parent Resumption
+
+When a child workflow completes, the parent is automatically resumed.
+
+### Resume Trigger
+
+```python
+# From runtime.py:584-588
+if workflow_instance.get("parent_workflow_instance_id") and workflow_instance.get(
+    "parent_step_instance_id"
+):
+    _resume_parent_from_child(cursor, workflow_instance, result_action)
+```
+
+### Resume Implementation
+
+```python
+# From runtime.py:723-853
+def _resume_parent_from_child(cursor, child_workflow_instance, child_result_action: str):
+    # Get child output data
+    cursor.execute(
+        """SELECT output_data, context_data FROM workflow_instance_data
+           WHERE workflow_instance_id = %s""",
+        (child_workflow_instance["id"],)
+    )
+    child_data = cursor.fetchone()
+    output_payload = (
+        (child_data["output_data"] if child_data and child_data["output_data"] else None)
+        or (child_data["context_data"] if child_data and child_data["context_data"] else None)
+        or {}
+    )
+    
+    # Load parent step instance
+    cursor.execute(
+        """SELECT * FROM step_instance WHERE id = %s""",
+        (child_workflow_instance["parent_step_instance_id"],)
+    )
+    parent_step_instance = cursor.fetchone()
+    
+    # Load parent workflow instance
+    cursor.execute(
+        """SELECT wi.*, wd.name AS workflow_definition_name
+           FROM workflow_instance wi
+           JOIN workflow_definition_version wdv ON wdv.id = wi.workflow_version_id
+           JOIN workflow_definition wd ON wd.id = wdv.workflow_definition_id
+           WHERE wi.id = %s""",
+        (child_workflow_instance["parent_workflow_instance_id"],)
+    )
+    parent_workflow_instance = cursor.fetchone()
+    
+    # Get mapping
+    parent_step_definition = _get_step_by_id(cursor, parent_step_instance["step_definition_id"])
+    mapping = _get_mapping(cursor, parent_step_definition["id"])
+    
+    # Update link
+    cursor.execute(
+        """UPDATE subworkflow_link
+           SET link_status = %s, resume_action = %s, completed_at = now()
+           WHERE child_workflow_instance_id = %s""",
+        (
+            "completed" if child_result_action == "approve" else "failed",
+            mapping["completion_action"] if child_result_action == "approve" else mapping["failure_action"],
+            child_workflow_instance["id"],
+        ),
+    )
+    
+    # Apply output mapping to parent context
+    cursor.execute(
+        """SELECT context_data FROM workflow_instance_data
+           WHERE workflow_instance_id = %s""",
+        (parent_workflow_instance["id"],)
+    )
+    parent_data = cursor.fetchone()
+    parent_context = parent_data["context_data"] if parent_data else {}
+    updated_context = _apply_output_mapping(
+        mapping["output_mapping"] or {},
+        output_payload,
+        parent_context or {},
+    )
+    cursor.execute(
+        """UPDATE workflow_instance_data
+           SET context_data = %s, updated_at = now()
+           WHERE workflow_instance_id = %s""",
+        (Json(updated_context), parent_workflow_instance["id"]),
+    )
+    
+    # Complete parent step
+    cursor.execute(
+        """UPDATE step_instance
+           SET status = %s, completed_at = now(), result_action = %s, result_payload = %s
+           WHERE id = %s""",
+        (
+            "completed" if child_result_action == "approve" else "failed",
+            mapping["completion_action"] if child_result_action == "approve" else mapping["failure_action"],
+            Json(output_payload),
+            parent_step_instance["id"],
+        ),
+    )
+    
+    # Determine resume action
+    action_to_apply = (
+        mapping["completion_action"] if child_result_action == "approve" else mapping["failure_action"]
+    )
+    
+    # Resolve next transition
+    transition = _transition_for_action(
+        cursor,
+        parent_workflow_instance["workflow_version_id"],
+        parent_step_definition["id"],
+        action_to_apply,
+        None,
+    )
+    
+    # If terminal, complete parent
+    if transition is None or transition["to_step_definition_id"] is None:
+        _complete_workflow(cursor, parent_workflow_instance, parent_step_instance, action_to_apply)
+        return
+    
+    # Resume parent workflow
+    cursor.execute(
+        """UPDATE workflow_instance
+           SET status = 'running', updated_at = now()
+           WHERE id = %s""",
+        (parent_workflow_instance["id"],)
+    )
+    _record_status_history(
+        cursor,
+        parent_workflow_instance["id"],
+        "paused",
+        "running",
+        reason="subworkflow completed",
+    )
+    
+    # Enter next step
+    next_step = _get_step_by_id(cursor, transition["to_step_definition_id"])
+    _enter_step(cursor, parent_workflow_instance, next_step, action_to_apply)
+```
+
+## Completion and Failure Actions
+
+The mapping determines which action to apply to the parent based on child outcome.
+
+### Successful Completion
+
+When the child completes successfully (`status = 'completed'`), the `completionAction` is applied:
+
+```json
+{
+  "completionAction": "approve"
+}
+```
+
+The parent workflow advances along the `approve` transition from the subworkflow step.
+
+### Child Failure
+
+When the child fails or is rejected (`status = 'rejected'` or `'failed'`), the `failureAction` is applied:
+
+```json
+{
+  "failureAction": "reject"
+}
+```
+
+The parent workflow advances along the `reject` transition, typically routing to error handling or revision.
+
+## Example: Budget Approval Subworkflow
+
+### Parent Workflow: Invoice Approval
+
+```json
+{
+  "key": "invoice_approval",
+  "name": "Invoice Approval",
+  "steps": [
+    {
+      "stepCode": "submit",
+      "stepType": "start",
+      "stepLabel": "Submit Invoice"
+    },
+    {
+      "stepCode": "budget_check",
+      "stepType": "subworkflow",
+      "stepLabel": "Budget Approval",
+      "subworkflowMapping": {
+        "childWorkflowDefinitionId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        "triggerMode": "sync_wait",
+        "inputMapping": {
+          "amount": "$.invoiceAmount",
+          "department": "$.department",
+          "fiscalYear": "2024"
+        },
+        "outputMapping": {
+          "budgetApproved": "$.approved",
+          "budgetBalance": "$.remainingBudget",
+          "approvedBy": "$.approver"
+        },
+        "completionAction": "approve",
+        "failureAction": "reject"
+      }
+    },
+    {
+      "stepCode": "final_approval",
+      "stepType": "human_task",
+      "stepLabel": "Final Approval"
+    },
+    {
+      "stepCode": "complete",
+      "stepType": "end",
+      "stepLabel": "Complete"
+    }
+  ],
+  "transitions": [
+    {
+      "fromStepCode": "submit",
+      "toStepCode": "budget_check",
+      "actionType": "approve"
+    },
+    {
+      "fromStepCode": "budget_check",
+      "toStepCode": "final_approval",
+      "actionType": "approve",
+      "transitionLabel": "Budget Available"
+    },
+    {
+      "fromStepCode": "budget_check",
+      "toStepCode": "submit",
+      "actionType": "reject",
+      "transitionLabel": "Insufficient Budget"
+    },
+    {
+      "fromStepCode": "final_approval",
+      "toStepCode": "complete",
+      "actionType": "approve"
+    }
+  ]
+}
+```
+
+### Child Workflow: Budget Approval
+
+```json
+{
+  "key": "budget_approval",
+  "name": "Budget Approval",
+  "steps": [
+    {
+      "stepCode": "start",
+      "stepType": "start",
+      "stepLabel": "Start"
+    },
+    {
+      "stepCode": "finance_review",
+      "stepType": "human_task",
+      "stepLabel": "Finance Review",
+      "associations": [
+        {
+          "associationType": "role",
+          "associationValue": "finance_manager"
+        }
+      ]
+    },
+    {
+      "stepCode": "approved",
+      "stepType": "end",
+      "stepLabel": "Approved"
+    },
+    {
+      "stepCode": "denied",
+      "stepType": "end",
+      "stepLabel": "Denied"
+    }
+  ],
+  "transitions": [
+    {
+      "fromStepCode": "start",
+      "toStepCode": "finance_review",
+      "actionType": "approve"
+    },
+    {
+      "fromStepCode": "finance_review",
+      "toStepCode": "approved",
+      "actionType": "approve"
+    },
+    {
+      "fromStepCode": "finance_review",
+      "toStepCode": "denied",
+      "actionType": "reject"
+    }
+  ]
+}
+```
+
+### Execution Trace
+
+1. Parent starts, enters `submit` step
+2. Parent advances to `budget_check` subworkflow step
+3. Parent status → `paused`, step status → `waiting`
+4. Child workflow launched with input: `{"amount": 15000, "department": "Engineering", "fiscalYear": "2024"}`
+5. Child enters `finance_review` human task
+6. Finance manager approves
+7. Child completes with status `completed`
+8. Child output: `{"approved": true, "remainingBudget": 85000, "approver": "jane@example.com"}`
+9. Output mapped to parent: `{"budgetApproved": true, "budgetBalance": 85000, "approvedBy": "jane@example.com"}`
+10. Parent step completes with `approve` action
+11. Parent status → `running`
+12. Parent advances to `final_approval` step
+
+## Querying Subworkflow Relationships
+
+### Find Child Workflows
+
+```sql
+SELECT
+  child.id AS child_id,
+  child.status AS child_status,
+  swl.link_status,
+  swl.resume_action,
+  wd.name AS child_workflow_name
+FROM subworkflow_link swl
+JOIN workflow_instance child ON child.id = swl.child_workflow_instance_id
+JOIN workflow_definition_version wdv ON wdv.id = child.workflow_version_id
+JOIN workflow_definition wd ON wd.id = wdv.workflow_definition_id
+WHERE swl.parent_workflow_instance_id = 'parent-uuid-here';
+```
+
+### Find Parent Workflow
+
+```sql
+SELECT
+  parent.id AS parent_id,
+  parent.status AS parent_status,
+  wd.name AS parent_workflow_name
+FROM workflow_instance child
+JOIN workflow_instance parent ON parent.id = child.parent_workflow_instance_id
+JOIN workflow_definition_version wdv ON wdv.id = parent.workflow_version_id
+JOIN workflow_definition wd ON wd.id = wdv.workflow_definition_id
+WHERE child.id = 'child-uuid-here';
+```
+
+## Limitations and Future Enhancements
+
+<AccordionGroup>
+  <Accordion title="Current Limitations">
+    - Only `sync_wait` mode is implemented (parent always pauses)
+    - No parallel child workflow execution
+    - Condition expressions not yet evaluated for dynamic child selection
+    - No built-in timeout or SLA enforcement for long-running children
+  </Accordion>
+  
+  <Accordion title="Planned Enhancements">
+    - **async_wait mode**: Fire-and-forget child execution
+    - **Parallel execution**: Launch multiple children concurrently
+    - **Dynamic child selection**: Choose child workflow based on runtime data
+    - **Timeout policies**: Auto-cancel children exceeding time limits
+    - **Partial output mapping**: Map child data even on failure
+    - **Child workflow monitoring**: Real-time visibility into child progress from parent UI
+  </Accordion>
+</AccordionGroup>
+
+<Card title="Related Concepts" icon="link">
+  - [Workflows](/concepts/workflows) - Workflow definitions and instances
+  - [Steps](/concepts/steps) - Step types and configuration
+  - [Transitions](/concepts/transitions) - Action routing and resolution
+</Card>
+
+## Implementation References
+
+- **Subworkflow Entry**: `apps/api/src/api/runtime.py:896-931`
+- **Child Launch**: `apps/api/src/api/runtime.py:636-721`
+- **Parent Resume**: `apps/api/src/api/runtime.py:723-853`
+- **Data Mapping**: `apps/api/src/api/runtime.py:611-633`
+- **Schema Definitions**: `apps/api/src/api/workflow_schemas.py:42-50`
+- **Database Schema**: `infra/postgres/init/01_foundation.sql:147-158`

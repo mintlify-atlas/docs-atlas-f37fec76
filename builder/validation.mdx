@@ -1,0 +1,693 @@
+---
+title: Validation
+description: Comprehensive validation rules enforced by the workflow API
+---
+
+The workflow API performs **server-side validation** on every workflow definition before persisting it to the database. This ensures workflow integrity and prevents runtime errors.
+
+## Validation Function
+
+All validation logic is centralized in the `_validate_workflow` function (workflows.py:72-192):
+
+```python
+def _validate_workflow(payload: WorkflowDefinitionCreate) -> tuple[dict, dict]:
+    errors: list[str] = []
+    steps_by_code = {step.stepCode: step for step in payload.steps}
+
+    # Validation checks...
+    
+    if errors:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"errors": errors},
+        )
+
+    builder_layout = payload.builderLayout or _derive_builder_layout(payload)
+    return _build_graph_json(payload), builder_layout
+```
+
+If any validation errors are detected, the API returns a **422 Unprocessable Entity** response with a list of error messages.
+
+## Validation Rules
+
+### 1. Step Code Uniqueness
+
+**Rule**: All `stepCode` values must be unique.
+
+```python
+# From workflows.py:76-77
+if len(steps_by_code) != len(payload.steps):
+    errors.append("Step codes must be unique.")
+```
+
+<CodeGroup>
+```json Valid
+{
+  "steps": [
+    { "stepCode": "start_request" },
+    { "stepCode": "manager_approval" },
+    { "stepCode": "completed" }
+  ]
+}
+```
+
+```json Invalid
+{
+  "steps": [
+    { "stepCode": "review" },
+    { "stepCode": "review" },  // ❌ Duplicate stepCode
+    { "stepCode": "completed" }
+  ]
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Error message**: `"Step codes must be unique."`
+</Warning>
+
+### 2. Exactly One Start Step
+
+**Rule**: The workflow must have exactly one step with `stepType: "start"`.
+
+```python
+# From workflows.py:79-81
+start_steps = [step.stepCode for step in payload.steps if step.stepType == "start"]
+if len(start_steps) != 1:
+    errors.append("Exactly one start step is required.")
+```
+
+<CodeGroup>
+```json Valid
+{
+  "steps": [
+    { "stepCode": "start_request", "stepType": "start" },
+    { "stepCode": "review", "stepType": "human_task" }
+  ]
+}
+```
+
+```json Invalid (No Start)
+{
+  "steps": [
+    { "stepCode": "review", "stepType": "human_task" },
+    { "stepCode": "completed", "stepType": "end" }
+  ]
+}
+```
+
+```json Invalid (Multiple Starts)
+{
+  "steps": [
+    { "stepCode": "start_a", "stepType": "start" },
+    { "stepCode": "start_b", "stepType": "start" },  // ❌
+    { "stepCode": "completed", "stepType": "end" }
+  ]
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Error message**: `"Exactly one start step is required."`
+</Warning>
+
+### 3. At Least One Terminal Step
+
+**Rule**: The workflow must have at least one step with `stepType: "end"` or `isTerminal: true`.
+
+```python
+# From workflows.py:83-87
+terminal_steps = [
+    step.stepCode for step in payload.steps if step.isTerminal or step.stepType == "end"
+]
+if not terminal_steps:
+    errors.append("At least one terminal or end step is required.")
+```
+
+<CodeGroup>
+```json Valid (End Step)
+{
+  "steps": [
+    { "stepCode": "start", "stepType": "start" },
+    { "stepCode": "completed", "stepType": "end" }
+  ]
+}
+```
+
+```json Valid (Terminal Flag)
+{
+  "steps": [
+    { "stepCode": "start", "stepType": "start" },
+    { "stepCode": "approved", "stepType": "human_task", "isTerminal": true }
+  ]
+}
+```
+
+```json Invalid
+{
+  "steps": [
+    { "stepCode": "start", "stepType": "start" },
+    { "stepCode": "review", "stepType": "human_task" }
+    // ❌ No terminal or end step
+  ]
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Error message**: `"At least one terminal or end step is required."`
+</Warning>
+
+### 4. Transition Source Exists
+
+**Rule**: Every `fromStepCode` in a transition must reference an existing step.
+
+```python
+# From workflows.py:93-95
+if transition.fromStepCode not in steps_by_code:
+    errors.append(f"Transition source step '{transition.fromStepCode}' does not exist.")
+```
+
+<CodeGroup>
+```json Valid
+{
+  "steps": [
+    { "stepCode": "start" },
+    { "stepCode": "review" }
+  ],
+  "transitions": [
+    { "fromStepCode": "start", "toStepCode": "review" }
+  ]
+}
+```
+
+```json Invalid
+{
+  "steps": [
+    { "stepCode": "start" },
+    { "stepCode": "review" }
+  ],
+  "transitions": [
+    { "fromStepCode": "invalid_step", "toStepCode": "review" }  // ❌
+  ]
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Error message**: `"Transition source step 'invalid_step' does not exist."`
+</Warning>
+
+### 5. Transition Target Exists
+
+**Rule**: Every `toStepCode` (if not null) must reference an existing step.
+
+```python
+# From workflows.py:97-99
+if transition.toStepCode and transition.toStepCode not in steps_by_code:
+    errors.append(f"Transition target step '{transition.toStepCode}' does not exist.")
+```
+
+<CodeGroup>
+```json Valid (Normal Transition)
+{
+  "transitions": [
+    { "fromStepCode": "start", "toStepCode": "review" }
+  ]
+}
+```
+
+```json Valid (Terminal Transition)
+{
+  "transitions": [
+    { "fromStepCode": "review", "toStepCode": null }  // ✓ Terminal
+  ]
+}
+```
+
+```json Invalid
+{
+  "transitions": [
+    { "fromStepCode": "start", "toStepCode": "missing_step" }  // ❌
+  ]
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Error message**: `"Transition target step 'missing_step' does not exist."`
+</Warning>
+
+### 6. Custom Actions Require actionCode
+
+**Rule**: If `actionType: "custom"`, the `actionCode` field must be provided.
+
+```python
+# From workflows.py:101-104
+if transition.actionType == "custom" and not transition.actionCode:
+    errors.append(
+        f"Transition '{transition.fromStepCode}' -> '{transition.toStepCode}' requires an actionCode."
+    )
+```
+
+<CodeGroup>
+```json Valid
+{
+  "fromStepCode": "payment",
+  "toStepCode": "verification",
+  "actionType": "custom",
+  "actionCode": "mark_as_paid"
+}
+```
+
+```json Invalid
+{
+  "fromStepCode": "payment",
+  "toStepCode": "verification",
+  "actionType": "custom",
+  "actionCode": null  // ❌ Required for custom actions
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Error message**: `"Transition 'payment' -> 'verification' requires an actionCode."`
+</Warning>
+
+### 7. No Unconditional Self-Loops
+
+**Rule**: A step cannot transition to itself without a `conditionExpression`.
+
+```python
+# From workflows.py:106-112
+if (
+    transition.toStepCode == transition.fromStepCode
+    and transition.conditionExpression is None
+):
+    errors.append(
+        f"Unconditional self-loop detected on step '{transition.fromStepCode}'."
+    )
+```
+
+<CodeGroup>
+```json Valid (Conditional Self-Loop)
+{
+  "fromStepCode": "retry",
+  "toStepCode": "retry",
+  "actionType": "revert",
+  "conditionExpression": "$.attempts < 3"  // ✓ Has condition
+}
+```
+
+```json Invalid (Unconditional Self-Loop)
+{
+  "fromStepCode": "retry",
+  "toStepCode": "retry",
+  "actionType": "approve",
+  "conditionExpression": null  // ❌ Infinite loop
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Error message**: `"Unconditional self-loop detected on step 'retry'."`
+</Warning>
+
+### 8. One Unconditional Transition Per Action
+
+**Rule**: Only one unconditional transition is allowed per (step, action) pair.
+
+```python
+# From workflows.py:114-120
+if transition.conditionExpression is None:
+    signature = (transition.fromStepCode, transition.actionType)
+    if signature in seen_unconditional:
+        errors.append(
+            "Only one unconditional transition is allowed per source step and action type."
+        )
+    seen_unconditional.add(signature)
+```
+
+<CodeGroup>
+```json Valid (Multiple Conditional)
+{
+  "transitions": [
+    {
+      "fromStepCode": "decision",
+      "toStepCode": "path_a",
+      "actionType": "approve",
+      "conditionExpression": "$.amount < 1000"
+    },
+    {
+      "fromStepCode": "decision",
+      "toStepCode": "path_b",
+      "actionType": "approve",
+      "conditionExpression": "$.amount >= 1000"
+    }
+  ]
+}
+```
+
+```json Invalid (Multiple Unconditional)
+{
+  "transitions": [
+    {
+      "fromStepCode": "review",
+      "toStepCode": "approved",
+      "actionType": "approve",
+      "conditionExpression": null
+    },
+    {
+      "fromStepCode": "review",
+      "toStepCode": "auto_approved",
+      "actionType": "approve",
+      "conditionExpression": null  // ❌ Ambiguous
+    }
+  ]
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Error message**: `"Only one unconditional transition is allowed per source step and action type."`
+</Warning>
+
+### 9. Subworkflow Steps Require Mapping
+
+**Rule**: Steps with `stepType: "subworkflow"` must have a `subworkflowMapping`.
+
+```python
+# From workflows.py:125-126
+if step.stepType == "subworkflow" and step.subworkflowMapping is None:
+    errors.append(f"Subworkflow step '{step.stepCode}' requires a subworkflow mapping.")
+```
+
+<CodeGroup>
+```json Valid
+{
+  "stepCode": "background_check",
+  "stepType": "subworkflow",
+  "subworkflowMapping": {
+    "childWorkflowDefinitionId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "triggerMode": "sync_wait",
+    "inputMapping": {},
+    "outputMapping": {},
+    "completionAction": "approve",
+    "failureAction": "reject"
+  }
+}
+```
+
+```json Invalid
+{
+  "stepCode": "background_check",
+  "stepType": "subworkflow",
+  "subworkflowMapping": null  // ❌ Required
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Error message**: `"Subworkflow step 'background_check' requires a subworkflow mapping."`
+</Warning>
+
+### 10. Non-Terminal Steps Must Have Outgoing Transitions
+
+**Rule**: Every step (except terminal/end steps) must have at least one outgoing transition.
+
+```python
+# From workflows.py:127-130
+if step.stepType == "end" or step.isTerminal:
+    continue
+if not outgoing.get(step.stepCode):
+    errors.append(f"Step '{step.stepCode}' must have at least one outgoing transition.")
+```
+
+<CodeGroup>
+```json Valid
+{
+  "steps": [
+    { "stepCode": "start", "stepType": "start" },
+    { "stepCode": "review", "stepType": "human_task" },
+    { "stepCode": "end", "stepType": "end" }
+  ],
+  "transitions": [
+    { "fromStepCode": "start", "toStepCode": "review" },
+    { "fromStepCode": "review", "toStepCode": "end" }
+  ]
+}
+```
+
+```json Invalid
+{
+  "steps": [
+    { "stepCode": "start", "stepType": "start" },
+    { "stepCode": "review", "stepType": "human_task" },
+    { "stepCode": "end", "stepType": "end" }
+  ],
+  "transitions": [
+    { "fromStepCode": "start", "toStepCode": "review" }
+    // ❌ 'review' has no outgoing transition
+  ]
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Error message**: `"Step 'review' must have at least one outgoing transition."`
+</Warning>
+
+### 11. All Steps Must Be Reachable
+
+**Rule**: Every step must be reachable from the start step via a depth-first search (DFS).
+
+```python
+# From workflows.py:132-150
+if start_steps:
+    reachable: set[str] = set()
+    stack = [start_steps[0]]
+
+    while stack:
+        current = stack.pop()
+        if current in reachable:
+            continue
+        reachable.add(current)
+        for transition in outgoing.get(current, []):
+            if transition.toStepCode:
+                stack.append(transition.toStepCode)
+
+    unreachable = set(steps_by_code) - reachable
+    if unreachable:
+        errors.append(
+            "Every step must be reachable from the start step. Unreachable: "
+            + ", ".join(sorted(unreachable))
+        )
+```
+
+<CodeGroup>
+```json Valid
+{
+  "steps": [
+    { "stepCode": "start" },
+    { "stepCode": "a" },
+    { "stepCode": "b" }
+  ],
+  "transitions": [
+    { "fromStepCode": "start", "toStepCode": "a" },
+    { "fromStepCode": "a", "toStepCode": "b" }
+  ]
+}
+```
+
+```json Invalid (Orphaned Step)
+{
+  "steps": [
+    { "stepCode": "start" },
+    { "stepCode": "a" },
+    { "stepCode": "orphan" }  // ❌ Not reachable
+  ],
+  "transitions": [
+    { "fromStepCode": "start", "toStepCode": "a" }
+  ]
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Error message**: `"Every step must be reachable from the start step. Unreachable: orphan"`
+</Warning>
+
+### 12. Cycles Must Have Visit Guards
+
+**Rule**: If the workflow contains a cycle, at least one step in the cycle must have `maxVisitsPerInstance` set.
+
+```python
+# From workflows.py:156-183
+def dfs(step_code: str) -> None:
+    visited.add(step_code)
+    active_lookup.add(step_code)
+    active_stack.append(step_code)
+
+    for transition in outgoing.get(step_code, []):
+        next_step = transition.toStepCode
+        if not next_step:
+            continue
+
+        if next_step in active_lookup:
+            cycle = active_stack[active_stack.index(next_step) :]
+            if not any(
+                steps_by_code[item].maxVisitsPerInstance is not None for item in cycle
+            ):
+                errors.append(
+                    "Detected a cycle without a maxVisitsPerInstance guard on steps: "
+                    + ", ".join(cycle)
+                )
+            continue
+
+        if next_step not in visited:
+            dfs(next_step)
+
+    active_stack.pop()
+    active_lookup.remove(step_code)
+
+dfs(start_steps[0])
+```
+
+<CodeGroup>
+```json Valid (Cycle with Guard)
+{
+  "steps": [
+    { "stepCode": "review", "stepType": "human_task", "maxVisitsPerInstance": 3 },
+    { "stepCode": "revision", "stepType": "human_task" }
+  ],
+  "transitions": [
+    { "fromStepCode": "review", "toStepCode": "revision", "actionType": "revert" },
+    { "fromStepCode": "revision", "toStepCode": "review", "actionType": "approve" }
+  ]
+}
+```
+
+```json Invalid (Cycle without Guard)
+{
+  "steps": [
+    { "stepCode": "review", "stepType": "human_task" },  // ❌ No maxVisitsPerInstance
+    { "stepCode": "revision", "stepType": "human_task" }
+  ],
+  "transitions": [
+    { "fromStepCode": "review", "toStepCode": "revision", "actionType": "revert" },
+    { "fromStepCode": "revision", "toStepCode": "review", "actionType": "approve" }
+  ]
+}
+```
+</CodeGroup>
+
+<Warning>
+  **Error message**: `"Detected a cycle without a maxVisitsPerInstance guard on steps: review, revision"`
+</Warning>
+
+## Error Response Format
+
+When validation fails, the API returns a 422 response:
+
+```json
+{
+  "detail": {
+    "errors": [
+      "Step codes must be unique.",
+      "Exactly one start step is required.",
+      "Transition target step 'missing_step' does not exist."
+    ]
+  }
+}
+```
+
+The builder UI displays these errors to the user:
+
+```typescript
+// From workflow-builder.tsx:693-710
+if (!response.ok) {
+  const errorDetail = "detail" in payload ? payload.detail : undefined
+
+  if (
+    typeof errorDetail === "object" &&
+    errorDetail !== null &&
+    "errors" in errorDetail &&
+    Array.isArray(errorDetail.errors)
+  ) {
+    throw new Error(errorDetail.errors.join(" "))
+  }
+
+  if (typeof errorDetail === "string") {
+    throw new Error(errorDetail)
+  }
+
+  throw new Error("Unable to save workflow definition.")
+}
+```
+
+The error is displayed in a red alert box below the metadata form (workflow-builder.tsx:1149-1153):
+
+```tsx
+{error ? (
+  <p className="rounded-xl border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive md:col-span-2">
+    {error}
+  </p>
+) : null}
+```
+
+## Pre-Save Validation
+
+Client-side validation could be added to catch errors before submitting:
+
+```typescript
+function validateWorkflow(
+  steps: BuilderStep[],
+  transitions: BuilderTransition[]
+): string[] {
+  const errors: string[] = []
+  const stepCodes = steps.map((s) => s.stepCode)
+  const uniqueCodes = new Set(stepCodes)
+
+  if (stepCodes.length !== uniqueCodes.size) {
+    errors.push("Step codes must be unique.")
+  }
+
+  const startSteps = steps.filter((s) => s.stepType === "start")
+  if (startSteps.length !== 1) {
+    errors.push("Exactly one start step is required.")
+  }
+
+  const terminalSteps = steps.filter(
+    (s) => s.stepType === "end" || s.isTerminal
+  )
+  if (terminalSteps.length === 0) {
+    errors.push("At least one terminal or end step is required.")
+  }
+
+  for (const t of transitions) {
+    if (!stepCodes.includes(t.fromStepCode)) {
+      errors.push(`Transition source step '${t.fromStepCode}' does not exist.`)
+    }
+    if (t.toStepCode && !stepCodes.includes(t.toStepCode)) {
+      errors.push(`Transition target step '${t.toStepCode}' does not exist.`)
+    }
+  }
+
+  return errors
+}
+```
+
+<Note>
+  This is not currently implemented in the builder UI, but could be added as a future enhancement to provide instant feedback.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Creating Workflows" icon="plus" href="/builder/creating-workflows">
+    Learn how to build valid workflow definitions
+  </Card>
+  <Card title="Step Configuration" icon="gear" href="/builder/step-configuration">
+    Understand step types and requirements
+  </Card>
+</CardGroup>
